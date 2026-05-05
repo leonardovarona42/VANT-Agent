@@ -1,0 +1,62 @@
+# VANT-Agent configuration
+# Copy to config.yaml and customize for your environment
+
+server:
+  url: "http://VANT-SIEM-SERVER:8000"
+  ingest_url: "http://VANT-SIEM-SERVER:9201"
+  auth_mode: "none"  # none | basic | token
+  auth_token: ""
+  auth_username: ""
+  auth_password: ""
+
+agent:
+  host_name: ""  # auto-detected if empty
+  check_interval: 60  # seconds between collection cycles
+  max_batch_size: 500
+  heartbeat_interval: 300  # seconds
+
+collectors:
+  snort:
+    enabled: false
+    path: "/var/log/snort/alert_json.txt"
+    source_type: "snort"
+  suricata:
+    enabled: false
+    path: "/var/log/suricata/eve.json"
+    source_type: "suricata"
+  windows_eventlog:
+    enabled: false
+    channels:
+      - Security
+      - System
+  postgres:
+    enabled: false
+    path: "/var/log/postgresql/postgresql-*.log"
+  file_logs:
+    enabled: false
+    items: []
+
+aegis_dlp:
+  enabled: false
+  scan_paths:
+    - "C:\\Users"
+    - "C:\\Documents"
+  scan_extensions:
+    - ".docx"
+    - ".xlsx"
+    - ".pdf"
+    - ".txt"
+  keywords:
+    - "clasificado"
+    - "secreto"
+    - "restringido"
+
+audit_inventory:
+  enabled: true
+  interval: 3600  # seconds
+
+logging:
+  level: "INFO"
+  file: "vant-agent.log"
+  max_bytes: 10485760
+  backup_count: 5

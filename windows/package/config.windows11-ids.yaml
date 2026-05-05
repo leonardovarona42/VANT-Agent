@@ -1,0 +1,95 @@
+agent:
+  id: "agent-ids-01"
+  host_name: "windows11-ids"
+  interval_seconds: 10
+
+output:
+  endpoint: "http://192.168.12.43:9201/api/v1/events/bulk"
+  source_endpoint: "http://192.168.12.43:9201/api/v1/sources/upsert"
+  timeout_seconds: 10
+  auth:
+    mode: "none"   # none|basic|token
+    username: ""
+    password: ""
+    token: ""
+  tls:
+    enabled: false
+    verify: false
+    ca_cert: ""
+
+control:
+  server_url: "http://192.168.12.43:8000"
+  require_https: false
+  token: ""
+  poll_seconds: 30
+  inventory_seconds: 86400
+  dlp_poll_seconds: 60
+  dlp_scan_seconds: 30
+
+asset_audit:
+  enabled: true
+
+aegis_dlp:
+  enabled: true
+  max_file_size_mb: 25
+  max_files_per_scan: 12000
+  max_scan_seconds: 20
+  scan_paths: []
+  monitored_extensions:
+    - ".txt"
+    - ".log"
+    - ".csv"
+    - ".json"
+    - ".xml"
+    - ".md"
+    - ".doc"
+    - ".docx"
+    - ".docm"
+    - ".rtf"
+    - ".xls"
+    - ".xlsx"
+    - ".xlsm"
+    - ".ppt"
+    - ".pptx"
+    - ".pptm"
+    - ".odt"
+    - ".ods"
+    - ".odp"
+    - ".ini"
+    - ".conf"
+    - ".cfg"
+    - ".yaml"
+    - ".yml"
+    - ".ps1"
+    - ".bat"
+    - ".cmd"
+    - ".sql"
+    - ".env"
+    - ".properties"
+    - ".html"
+    - ".htm"
+    - ".pdf"
+
+collectors:
+  snort:
+    enabled: true
+    path: "C:/Snort"
+    start_position: "beginning"
+    max_lines_per_cycle: 400
+  suricata:
+    enabled: true
+    path: "C:/suricata-log/eve.json"
+    start_position: "beginning"
+    max_lines_per_cycle: 600
+  windows_eventlog:
+    enabled: false
+    channel: "Security"
+    channels:
+      - "Security"
+      - "System"
+      - "Application"
+  postgres:
+    enabled: false
+    path: "C:/Program Files/PostgreSQL/16/data/log/postgresql.log"
+    start_position: "end"
+    max_lines_per_cycle: 400

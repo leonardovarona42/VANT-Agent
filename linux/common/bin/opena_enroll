@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SERVICE_ROOT="${VANT_AGENT_ROOT:-/opt/vant-siem-agent}"
+TOOLS_BIN="${SERVICE_ROOT}/vant-agent-tools"
+PYTHON_BIN="${VANT_AGENT_PYTHON:-}"
+
+if [[ -x "${TOOLS_BIN}" ]]; then
+  exec "${TOOLS_BIN}" enroll "$@"
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  for candidate in \
+    "${SERVICE_ROOT}/venv/bin/python" \
+    "/opt/vant-siem-agent/venv/bin/python" \
+    "${ROOT_DIR}/venv/bin/python" \
+    "${ROOT_DIR}/agent/venv/bin/python" \
+    "$(command -v python3 2>/dev/null || true)"; do
+    if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+      PYTHON_BIN="${candidate}"
+      break
+    fi
+  done
+fi
+
+exec "${PYTHON_BIN}" "${ROOT_DIR}/scripts/agent_tools.py" enroll "$@"

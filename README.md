@@ -1,35 +1,49 @@
 # VANT-Agent
 
-Agente de recolección de eventos y seguridad para endpoints, parte del ecosistema **VANT-SIEM**.
+Agente de recoleccion de eventos y seguridad para endpoints, parte del ecosistema **VANT-SIEM**.
 
-> **Servidor SIEM**: [VANT-SIEM](https://github.com/anomalyco/VANT-SIEM)
+> **Servidor SIEM**: [VANT-SIEM](https://github.com/leonardovarona42/VANT-SIEM)
 
-## Descripción
+## Descripcion
 
 VANT-Agent se instala en los endpoints (Windows/Linux) y se encarga de:
 
-- **Recolección multi-fuente**: Snort, Suricata, Windows Event Log, PostgreSQL, file logs
+- **Recoleccion multi-fuente**: Snort, Suricata, Windows Event Log, PostgreSQL, file logs
 - **Inventario de hardware/software**: CPU, memoria, disco, software instalado, red, USB
-- **DLP (Aegis)**: Detección de fuga de información clasificada
-- **Envío al servidor**: Comunicación con VANT-SIEM vía API REST
+- **DLP (Aegis)**: Deteccion de fuga de informacion clasificada
+- **Envio al servidor**: Comunicacion con VANT-SIEM via API REST
 
 ## Arquitectura
 
 ```
 VANT-Agent (endpoint)
     │
-    ├── agent.py           → Orchestrator principal
-    ├── collectors/        → Recolectores de logs
-    │   ├── snort.py
-    │   ├── suricata.py
-    │   ├── windows_eventlog.py
-    │   ├── postgres_log.py
-    │   └── file_log.py
-    ├── services/
-    │   ├── aegis_dlp.py   → Motor DLP
-    │   └── audit_inventory.py → Inventario
-    ├── config.yaml        → Configuración del agente
-    └── windows/           → Agente empaquetado para Windows
+    ├── vant/
+    │   ├── main.py             → Orchestrator principal
+    │   ├── tray.py             → System tray GUI (Windows)
+    │   ├── config.py           → Carga y validacion de config
+    │   ├── api.py              → Cliente HTTP unificado
+    │   ├── utils.py            → Helpers (host detection, logging)
+    │   └── modules/
+    │       ├── collectors/     → Recolectores de logs
+    │       │   ├── snort.py
+    │       │   ├── suricata.py
+    │       │   ├── windows_eventlog.py
+    │       │   ├── postgres_log.py
+    │       │   └── file_log.py
+    │       ├── inventory/      → Inventario HW/SW
+    │       │   ├── collector.py
+    │       │   ├── models.py
+    │       │   └── service.py
+    │       ├── dlp/
+    │       │   └── aegis.py    → Motor DLP
+    │       └── heartbeat/
+    │           └── service.py  → Heartbeat + comandos
+    │
+    ├── config.yaml             → Configuracion del agente
+    └── installer/              → Windows installer
+        ├── vant_agent.iss      → Inno Setup script
+        └── build_installer.ps1 → PowerShell builder
 ```
 
 ## Flujo de datos
@@ -37,70 +51,70 @@ VANT-Agent (endpoint)
 ```
 Endpoint                    VANT-SIEM Server
     │                            │
-    ├── POST /api/agent/enroll/ ─┤
-    ├── POST /api/agent/heartbeat/ ─┤
-    ├── POST /api/agent/inventory/ ─┤
-    ├── POST /api/agent/dlp/incidents/ ─┤
-    ├── POST /os-service/api/v1/events/bulk/ ─┤
-    └── POST /api/agent/commands/pull/ ─┤
+    ├── POST /inventory/api/register/ ─┤
+    ├── POST /inventory/api/heartbeat/ ─┤
+    ├── POST /inventory/api/inventory/submit/ ─┤
+    ├── POST /inventory/api/command-result/ ─┤
+    ├── POST /logs/api/ingest/bulk/ ─┤
+    └── POST /logs/api/sources/ ─┤
 ```
 
-## Instalación
+## Instalacion
 
 ### Windows
 
 1. Descargar el instalador desde releases
-2. Ejecutar `opensearch_agent_setup.exe`
-3. Configurar la IP del servidor VANT-SIEM
-4. El agente se registra automáticamente
+2. Ejecutar `VANT-Agent-Setup.exe`
+3. Configurar la IP del servidor VANT-SIEM en el wizard
+4. El agente se registra automaticamente y arranca como servicio
 
-### Linux (Debian/Ubuntu/Zentyal)
+### Ejecucion manual
 
 ```bash
-cd linux/
-sudo ./build_linux.sh
-sudo systemctl start vant-agent
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python -m vant.main --config config.yaml
 ```
 
-## Configuración
+## Configuracion
 
 El archivo `config.yaml` define:
 
-- **server_url**: URL del servidor VANT-SIEM
+- **server.url**: URL del servidor VANT-SIEM (puerto 8000 para control/inventory)
+- **server.logs_url**: URL del servicio de logs (puerto 9201)
+- **agent**: hostname, intervalo, heartbeat
 - **collectors**: Fuentes de logs habilitadas
-- **aegis_dlp**: Políticas de DLP
-- **heartbeat**: Intervalo de heartbeat
+- **inventory**: intervalo de recoleccion de HW/SW
+- **dlp**: Politicas de DLP
 
 Ver `config.example.yaml` para referencia completa.
 
 ## Desarrollo
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux
-venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 
 # Ejecutar agente manualmente
-python agent.py
+python -m vant.main --config config.yaml
 
-# Verificar configuración
-python opensearchcheck.py
+# Ejecutar con system tray (Windows)
+python -m vant.tray --config config.yaml
 ```
 
-## Relación con VANT-SIEM
+## Relacion con VANT-SIEM
 
-| Componente | Repo | Función |
+| Componente | Repo | Funcion |
 |-----------|------|---------|
 | **VANT-Agent** | Este repo | Agente de endpoint |
-| **VANT-SIEM** | [github.com/anomalyco/VANT-SIEM](https://github.com/anomalyco/VANT-SIEM) | Servidor SIEM, dashboard, IA |
+| **VANT-SIEM** | [github.com/leonardovarona42/VANT-SIEM](https://github.com/leonardovarona42/VANT-SIEM) | Servidor SIEM, dashboard, IA |
 
 El agente **no funciona sin** VANT-SIEM. El servidor proporciona:
 - API de ingesta de eventos
-- Gestión de agentes (enroll, heartbeat, comandos)
-- Políticas DLP centralizadas
+- Gestion de agentes (register, heartbeat, comandos)
+- Politicas DLP centralizadas
 - Dashboard de monitoreo
 
 ## Licencia
 
-MIT - © 2025 VANT-SIEM Team
+MIT - 2025 VANT-SIEM Team

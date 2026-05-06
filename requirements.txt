@@ -1,12 +1,10 @@
-# VANT-SIEM Agent Dependencies
-# Install with: pip install -r requirements.txt
+# VANT-Agent Dependencies
 
-# Core dependencies
 PyYAML>=6.0
 requests>=2.28.0
 
-# GUI/build dependencies
+# GUI (Windows tray) - optional
 PyQt6>=6.10; platform_system == "Windows"
 
-# For building executables (optional)
-# pyinstaller>=5.0
+# Build tools - optional
+pyinstaller>=5.0

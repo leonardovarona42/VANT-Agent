@@ -30,8 +30,8 @@ def detect_os_type():
     system = platform.system().lower()
     if system != "windows":
         return "other"
-    release = platform.release()
     version = platform.version()
+    release = platform.release()
     if "10.0." in version:
         build = version.split(".")[-1]
         try:
@@ -39,11 +39,16 @@ def detect_os_type():
                 return "windows_11"
         except Exception:
             pass
-        return "windows_10"
-    if "2022" in platform.win32_ver()[2]:
-        return "windows_server_2022"
-    if "2019" in platform.win32_ver()[2]:
-        return "windows_server_2019"
+    if "11" in release:
+        return "windows_11"
+    ver_info = platform.win32_ver()[2]
+    if "Server" in ver_info or "server" in ver_info.lower():
+        if "2025" in ver_info:
+            return "windows_server_2025"
+        if "2022" in ver_info:
+            return "windows_server_2022"
+        if "2019" in ver_info:
+            return "windows_server_2019"
     return "windows_10"
 
 
@@ -142,20 +147,36 @@ def collect_windows_hardware():
     return hw
 
 
+def _parse_install_date(raw):
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return raw
+
+
 def collect_windows_software():
-    apps = safe_json_command(
-        'powershell -NoProfile -Command "Get-ItemProperty '
-        'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | '
-        'Select-Object DisplayName,DisplayVersion,Publisher,InstallDate,EstimatedSize | '
-        'ConvertTo-Json -Compress"'
+    ps_cmd = (
+        'powershell -NoProfile -Command '
+        '"$r=@(); '
+        'foreach ($k in @('
+        '\'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\','
+        '\'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\'')) {'
+        '  Get-ItemProperty $k -ErrorAction SilentlyContinue | ?{$_.DisplayName} | %{'
+        '    $r+=@{n=$_.DisplayName;v=$_.DisplayVersion;p=$_.Publisher;d=$_.InstallDate;s=$_.EstimatedSize}'
+        '  }'
+        '}; '
+        '$r|ConvertTo-Json -Compress"'
     )
+    apps = safe_json_command(ps_cmd)
     sw_list = []
     for item in apps:
-        name = item.get("DisplayName", "")
+        name = item.get("n", "")
         if not name:
             continue
         size_mb = 0
-        est = item.get("EstimatedSize")
+        est = item.get("s")
         if est:
             try:
                 size_mb = round(int(est) / 1024, 1)
@@ -163,9 +184,9 @@ def collect_windows_software():
                 pass
         sw_list.append({
             "name": name,
-            "version": item.get("DisplayVersion", ""),
-            "publisher": item.get("Publisher", ""),
-            "install_date": item.get("InstallDate", ""),
+            "version": item.get("v", ""),
+            "publisher": item.get("p", ""),
+            "install_date": _parse_install_date(item.get("d", "")),
             "size_mb": size_mb,
             "is_system": False,
         })

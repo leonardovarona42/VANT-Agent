@@ -88,10 +88,25 @@ def sleep_with_stop(stop_event, seconds):
 def detect_os():
     import platform
     system = platform.system().lower()
-    release = platform.release()
     if system == "windows":
-        if "11" in release or int(release.split(".")[0]) >= 10:
+        version = platform.version()
+        if "10.0." in version:
+            try:
+                build = int(version.split(".")[-1])
+                if build >= 22000:
+                    return "windows_11"
+            except Exception:
+                pass
+        release = platform.release()
+        if "11" in release:
             return "windows_11"
+        if "Server" in platform.win32_ver()[2] or "server" in platform.version().lower():
+            if "2025" in platform.win32_ver()[2]:
+                return "windows_server_2025"
+            if "2022" in platform.win32_ver()[2]:
+                return "windows_server_2022"
+            if "2019" in platform.win32_ver()[2]:
+                return "windows_server_2019"
         return "windows_10"
     if system == "linux":
         try:

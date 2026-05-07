@@ -87,3 +87,10 @@ def get_log_dir(config_path, log_file):
         return Path(sys.executable).resolve().parent
     base = Path(config_path).resolve().parent
     return base
+
+
+def save_config(config_path, cfg):
+    p = Path(config_path)
+    existing = yaml.safe_load(p.read_text(encoding="utf-8")) or {} if p.exists() else {}
+    merged = _deep_merge(existing, cfg)
+    p.write_text(yaml.dump(merged, default_flow_style=False, sort_keys=False, allow_unicode=True), encoding="utf-8")

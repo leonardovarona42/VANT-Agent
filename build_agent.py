@@ -78,6 +78,13 @@ def build():
         print_warn("Installing PyInstaller...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
+    try:
+        import PyQt6
+        print_ok(f"PyQt6: installed")
+    except ImportError:
+        print_warn("Installing PyQt6...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt6"])
+
     clean()
 
     print_header("Building VANT-Agent")
@@ -88,15 +95,23 @@ def build():
         "--onefile",
         "--console",
         "--clean",
-        "--add-data", f"config.example.yaml{os.pathsep}.",
+        "--add-data", "config.example.yaml;.",
         "--hidden-import", "yaml",
         "--hidden-import", "requests",
+        "--hidden-import", "vant",
+        "--hidden-import", "vant.main",
         "--hidden-import", "vant.modules.inventory.collector",
         "--hidden-import", "vant.modules.inventory.service",
         "--hidden-import", "vant.modules.heartbeat.service",
+        "--hidden-import", "vant.modules.collectors.file_log",
+        "--hidden-import", "vant.modules.collectors.windows_eventlog",
+        "--hidden-import", "vant.modules.collectors.postgres_log",
+        "--hidden-import", "vant.modules.collectors.suricata",
+        "--hidden-import", "vant.modules.collectors.snort",
+        "--hidden-import", "vant.modules.dlp.aegis",
         "--exclude-module", "pytest",
         "--exclude-module", "setuptools",
-        "-m", "vant.main",
+        "run.py",
     ]
 
     print_info(f"Running: {' '.join(cmd[:5])}...")

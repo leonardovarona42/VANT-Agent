@@ -12,6 +12,83 @@ from vant.modules.heartbeat.service import HeartbeatService
 AGENT_VERSION = "1.1.0"
 
 
+def run_tray_mode(config_path):
+    import threading
+    try:
+        from PyQt6 import QtWidgets, QtGui
+    except ImportError:
+        print("Error: PyQt6 is required for tray mode. Install with: pip install PyQt6")
+        sys.exit(1)
+
+    class _Stop:
+        def __init__(self):
+            self._event = threading.Event()
+        def is_set(self):
+            return self._event.is_set()
+        def set(self):
+            self._event.set()
+
+    class TrayApp(QtWidgets.QSystemTrayIcon):
+        def __init__(self, cfg_path):
+            super().__init__()
+            self.config_path = cfg_path
+            self.stop = _Stop()
+            icon = QtGui.QIcon()
+            cfg_dir = Path(cfg_path).parent
+            base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent.parent)))
+            for candidate in [
+                cfg_dir / "logo.png",
+                base / "img" / "logo.png",
+                base / "staticfiles" / "img" / "logo.png",
+            ]:
+                if candidate.exists():
+                    icon = QtGui.QIcon(str(candidate))
+                    if not icon.isNull():
+                        break
+            self.setIcon(icon)
+            self.setToolTip("VANT-SIEM Agent v" + AGENT_VERSION)
+
+            menu = QtWidgets.QMenu()
+            menu.addAction("Status", lambda: QtWidgets.QMessageBox.information(None, "VANT Agent", "Agent is running"))
+            menu.addAction("Restart", self._restart)
+            menu.addAction("Stop", self._stop)
+            menu.addAction("Exit", self._exit)
+            self.setContextMenu(menu)
+
+            self._start_agent()
+            self.setVisible(True)
+            QtWidgets.QApplication.instance().setQuitOnLastWindowClosed(False)
+            if QtWidgets.QSystemTrayIcon.isSystemTrayAvailable() and not icon.isNull():
+                self.showMessage("VANT-SIEM Agent", f"Agent v{AGENT_VERSION} running in system tray", icon, 2500)
+
+        def _start_agent(self):
+            self.stop = _Stop()
+            self.worker = threading.Thread(target=self._run, args=(self.stop,), daemon=True)
+            self.worker.start()
+
+        def _run(self, stop_ev):
+            run_with_stop(self.config_path, stop_ev)
+
+        def _restart(self):
+            self.stop.set()
+            self._start_agent()
+            QtWidgets.QMessageBox.information(None, "VANT Agent", "Agent restarted")
+
+        def _stop(self):
+            self.stop.set()
+            QtWidgets.QMessageBox.information(None, "VANT Agent", "Agent stopped")
+
+        def _exit(self):
+            self.stop.set()
+            QtWidgets.QApplication.quit()
+
+    app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("VANT-SIEM Agent")
+    app.setQuitOnLastWindowClosed(False)
+    TrayApp(config_path)
+    sys.exit(app.exec())
+
+
 def build_collectors(cfg, logger):
     collectors = []
     collectors_cfg = cfg.get("collectors", {})
@@ -99,9 +176,11 @@ def run_with_stop(config_path, stop_event):
     log_every = int(agent_cfg.get("log_every_cycles", 60))
 
     inv_cfg = cfg.get("inventory", {})
+    if not inv_cfg:
+        inv_cfg = cfg.get("modules", {}).get("inventory", {})
     inv_enabled = inv_cfg.get("enabled", True)
     inv_service = InventoryService(cfg) if inv_enabled else None
-    inv_interval = int(inv_cfg.get("interval", 86400))
+    inv_interval = int(inv_cfg.get("interval", 300))
 
     hb_service = HeartbeatService(cfg, logger)
 
@@ -133,6 +212,20 @@ def run_with_stop(config_path, stop_event):
     if inv_service and not inv_service.agent_id:
         logger.info("registering with inventory service...")
         inv_service.register(client, logger)
+
+    if inv_service and inv_service.agent_id:
+        logger.info("checking for pending config commands...")
+        try:
+            hb_data = inv_service.heartbeat(client, logger)
+            if hb_data:
+                result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger)
+                if result == "reload":
+                    cfg = load_config(config_path)
+                    cfg["_config_path"] = config_path
+                    collectors = build_collectors(cfg, logger)
+                    logger.info("config.applied and collectors rebuilt on startup")
+        except Exception as e:
+            logger.warning("startup config check error=%s", e)
 
     cycle = 0
     next_inventory = time.time()
@@ -170,10 +263,19 @@ def run_with_stop(config_path, stop_event):
             if inv_service and inv_service.agent_id:
                 try:
                     hb_data = inv_service.heartbeat(client, logger)
-                    result = hb_service.process_commands(hb_data, inv_service, client, logger)
-                    if result == "stop":
-                        stop_event.set()
-                        break
+                    if hb_data:
+                        result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger)
+                        if result == "reload":
+                            cfg = load_config(config_path)
+                            cfg["_config_path"] = config_path
+                            collectors = build_collectors(cfg, logger)
+                            inv_cfg = cfg.get("inventory", {})
+                            if inv_cfg.get("enabled"):
+                                inv_interval = int(inv_cfg.get("interval", 300))
+                            logger.info("config.applied and collectors rebuilt")
+                        elif result == "stop":
+                            stop_event.set()
+                            break
                 except SystemExit:
                     raise
                 except Exception as e:
@@ -202,15 +304,19 @@ def run(config_path):
 def main():
     parser = argparse.ArgumentParser(description="VANT-SIEM Agent")
     parser.add_argument("--config", default=find_config(), help="Path to config.yaml")
+    parser.add_argument("--tray", action="store_true", help="Run with system tray icon")
     args = parser.parse_args()
 
     if not args.config:
         print("Error: No config file found. Create config.yaml or use --config")
         sys.exit(1)
 
-    print(f"VANT-SIEM Agent v{AGENT_VERSION}")
-    print(f"Config: {args.config}")
-    run(args.config)
+    if args.tray:
+        run_tray_mode(args.config)
+    else:
+        print(f"VANT-SIEM Agent v{AGENT_VERSION}")
+        print(f"Config: {args.config}")
+        run(args.config)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,15 @@ class InventoryService:
         state_file = self._state_dir / "inventory_state.json"
         state_file.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
 
+    @property
+    def config_version(self):
+        return self._state.get("config_version", 0)
+
+    @config_version.setter
+    def config_version(self, value):
+        self._state["config_version"] = value
+        self._save_state()
+
     def register(self, client, logger):
         hostname, ip = detect_host()
         cfg = self.config.get("agent", {})
@@ -77,12 +86,17 @@ class InventoryService:
             return
         _, ip = detect_host()
         try:
-            resp = client.send_heartbeat(self.agent_id, ip)
+            resp = client.send_heartbeat(self.agent_id, ip, self.config_version)
             if resp.status_code == 200:
                 data = resp.json()
                 commands = data.get("commands", [])
                 if commands:
                     logger.info("heartbeat got %d pending commands", len(commands))
+
+                cfg_update = data.get("config_update", {})
+                if cfg_update.get("available"):
+                    logger.info("config update available version=%s", cfg_update.get("version"))
+
                 return data
         except Exception as e:
             logger.warning("heartbeat error=%s", e)

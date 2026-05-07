@@ -7,11 +7,10 @@ class VantClient:
         server = cfg.get("server", {})
         self.base_url = server.get("url", "http://localhost:8000").rstrip("/")
         self.logs_url = server.get("logs_url", "http://localhost:9201").rstrip("/")
-        auth = server.get("auth", {})
-        self.auth_mode = auth.get("mode", "none")
-        self.token = auth.get("token", "")
-        self.username = auth.get("username", "")
-        self.password = auth.get("password", "")
+        self.auth_mode = server.get("auth_mode", "none")
+        self.token = server.get("auth_token", "")
+        self.username = server.get("auth_username", "")
+        self.password = server.get("auth_password", "")
         self.timeout = int(server.get("timeout", 15))
 
         tls = server.get("tls", {})
@@ -50,8 +49,8 @@ class VantClient:
     def register_agent(self, data):
         return self._post(f"{self.base_url}/inventory/api/register/", data)
 
-    def send_heartbeat(self, agent_id, ip_address=None):
-        payload = {"agent_id": agent_id}
+    def send_heartbeat(self, agent_id, ip_address=None, config_version=0):
+        payload = {"agent_id": agent_id, "config_version": config_version}
         if ip_address:
             payload["ip_address"] = ip_address
         return self._post(f"{self.base_url}/inventory/api/heartbeat/", payload)

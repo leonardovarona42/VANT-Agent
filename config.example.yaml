@@ -2,7 +2,7 @@
 # Copy to config.yaml and customize for your environment
 
 server:
-  url: "http://VANT-SIEM-SERVER:8000"
+  url: "http://VANT-SIEM-SERVER:8003"
   logs_url: "http://VANT-SIEM-SERVER:9201"
   auth_mode: "none"  # none | basic | token
   auth_token: ""
@@ -45,7 +45,7 @@ collectors:
 
 inventory:
   enabled: true
-  interval: 86400  # seconds (24h) between full inventory submissions
+  interval: 300  # seconds between inventory submissions (default 5min)
 
 dlp:
   enabled: false

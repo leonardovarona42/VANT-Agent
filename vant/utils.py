@@ -126,3 +126,32 @@ def detect_os():
     if system == "darwin":
         return "macos_15"
     return "other"
+
+
+def get_mac_address():
+    import platform
+    if platform.system() == "Windows":
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetAdapter | Where-Object {$_.Status -eq 'Up' -and $_.MacAddress -ne $null} | Select-Object -First 1).MacAddress"],
+                text=True, stderr=subprocess.DEVNULL
+            ).strip()
+            if out and ":" in out:
+                return out.upper()
+        except Exception:
+            pass
+        try:
+            import uuid
+            mac = uuid.getnode()
+            return ":".join(["{:02x}".format((mac >> i) & 0xff).upper() for i in range(0, 8 * 6, 8)][::-1])
+        except Exception:
+            pass
+    else:
+        try:
+            with open("/sys/class/net/$(ls /sys/class/net | grep -v lo | head -1)/address") as f:
+                return f.read().strip().upper()
+        except Exception:
+            pass
+    return ""

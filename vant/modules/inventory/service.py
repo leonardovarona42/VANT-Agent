@@ -5,7 +5,7 @@ import socket
 import time
 from pathlib import Path
 
-from vant.utils import detect_host, detect_os
+from vant.utils import detect_host, detect_os, get_mac_address
 from vant.modules.inventory.collector import (
     collect_windows_hardware, collect_windows_software, detect_os_type,
 )
@@ -49,6 +49,7 @@ class InventoryService:
         hostname, ip = detect_host()
         cfg = self.config.get("agent", {})
         os_type = detect_os()
+        mac = get_mac_address()
 
         data = {
             "hostname": cfg.get("host_name", hostname) or hostname,
@@ -58,6 +59,7 @@ class InventoryService:
             "os_arch": platform.machine(),
             "agent_version": "1.1.0",
             "ip_address": ip or None,
+            "mac_address": mac,
             "domain": "",
             "tags": ["vant-agent"],
         }

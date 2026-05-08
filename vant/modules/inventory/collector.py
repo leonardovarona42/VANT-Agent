@@ -157,24 +157,28 @@ def _parse_install_date(raw):
 
 
 def collect_windows_software():
-    ps_cmd = (
-        'powershell -NoProfile -Command '
-        '"$r=@(); '
-        'foreach ($k in @('
-        '\'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\','
-        '\'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\'')) {'
-        '  Get-ItemProperty $k -ErrorAction SilentlyContinue | ?{$_.DisplayName} | %{'
-        '    $r+=@{n=$_.DisplayName;v=$_.DisplayVersion;p=$_.Publisher;d=$_.InstallDate;s=$_.EstimatedSize}'
-        '  }'
-        '}; '
+    ps_cmd = 'powershell -NoProfile -Command "$r=@(); ' \
+        "foreach ($k in @(" \
+        "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', " \
+        "'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')) {" \
+        "  Get-ItemProperty $k -ErrorAction SilentlyContinue | ?{$_.DisplayName} | %{" \
+        "    $r+=@{n=$_.DisplayName;v=$_.DisplayVersion;p=$_.Publisher;d=$_.InstallDate;s=$_.EstimatedSize}" \
+        "  }" \
+        "}; " \
         '$r|ConvertTo-Json -Compress"'
-    )
     apps = safe_json_command(ps_cmd)
     sw_list = []
+    seen = set()
     for item in apps:
         name = item.get("n", "")
         if not name:
             continue
+        version = item.get("v", "")
+        publisher = item.get("p", "")
+        key = (name, version, publisher)
+        if key in seen:
+            continue
+        seen.add(key)
         size_mb = 0
         est = item.get("s")
         if est:
@@ -184,8 +188,8 @@ def collect_windows_software():
                 pass
         sw_list.append({
             "name": name,
-            "version": item.get("v", ""),
-            "publisher": item.get("p", ""),
+            "version": version or "",
+            "publisher": publisher or "",
             "install_date": _parse_install_date(item.get("d", "")),
             "size_mb": size_mb,
             "is_system": False,

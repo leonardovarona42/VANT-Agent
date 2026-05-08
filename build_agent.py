@@ -63,13 +63,14 @@ def build():
     print_header(f"VANT-Agent v{AGENT_VERSION} Builder")
 
     # Check deps
-    for dep in ['yaml', 'requests']:
+    dep_map = {'yaml': 'pyyaml', 'requests': 'requests'}
+    for mod, pkg in dep_map.items():
         try:
-            __import__(dep)
-            print_ok(f"{dep}: installed")
+            __import__(mod)
+            print_ok(f"{mod}: installed")
         except ImportError:
-            print_warn(f"{dep}: installing...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
+            print_warn(f"{mod}: installing...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
     try:
         import PyInstaller

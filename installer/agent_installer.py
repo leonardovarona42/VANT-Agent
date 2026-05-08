@@ -736,6 +736,17 @@ class InstallerWindow(QMainWindow):
 
 
 def main():
+    if not _is_admin():
+        try:
+            exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+            params = ' '.join([f'"{a}"' for a in sys.argv[1:]])
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", exe, params, None, 1
+            )
+            sys.exit(0)
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 

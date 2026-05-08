@@ -63,6 +63,57 @@ def build_collectors(cfg):
     return collectors
 
 
+def _apply_push_config(config_path, payload, logger, control_server, control_token, cmd_id):
+    try:
+        cfg = load_cfg(config_path)
+
+        new_config = payload.get("config", {})
+
+        if "inventory" in new_config:
+            inv_cfg = new_config["inventory"]
+            control = cfg.get("control", {})
+            control["inventory_seconds"] = inv_cfg.get("interval", control.get("inventory_seconds", 86400))
+            cfg["control"] = control
+
+        if "collectors" in new_config:
+            cfg["collectors"] = new_config["collectors"]
+
+        if "dlp" in new_config:
+            dlp_cfg = cfg.get("aegis_dlp", {})
+            dlp_cfg.update(new_config["dlp"])
+            cfg["aegis_dlp"] = dlp_cfg
+
+        config_text = yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        Path(config_path).write_text(config_text, encoding="utf-8")
+        logger.info("config.applied path=%s", config_path)
+
+        if cmd_id:
+            _control_post(
+                f"{control_server}/api/agent/commands/ack/",
+                {"command_id": cmd_id, "status": "done"},
+                control_token,
+                timeout=8,
+            )
+
+        if _restart_self(config_path, logger):
+            logger.warning("config.applied restarted to apply collector changes")
+            sys.exit(0)
+        else:
+            logger.error("config.applied restart failed")
+    except Exception as exc:
+        logger.exception("config.apply failed error=%s", exc)
+        if cmd_id:
+            try:
+                _control_post(
+                    f"{control_server}/api/agent/commands/ack/",
+                    {"command_id": cmd_id, "status": "error: " + str(exc)},
+                    control_token,
+                    timeout=8,
+                )
+            except Exception:
+                pass
+
+
 def _detect_host():
     hostname = socket.gethostname()
     ip = ""
@@ -339,35 +390,41 @@ def run_with_stop(config_path, stop_event):
                     )
                     if cmd_resp.status_code == 200:
                         data = cmd_resp.json()
-                        command = data.get("command")
-                        command_id = data.get("command_id")
-                        command_acked = False
-                        if command == "stop":
-                            logger.warning("command.stop received")
-                            stop_event.set()
-                        elif command == "restart":
-                            logger.warning("command.restart received")
-                            if _restart_self(config_path, logger):
-                                if command_id:
+                        commands = data.get("commands", [])
+                        if commands:
+                            logger.info("pull_commands got %d commands", len(commands))
+                        for cmd_item in commands:
+                            cmd_type = cmd_item.get("command_type", "")
+                            cmd_id = cmd_item.get("command_id", "")
+                            cmd_payload = cmd_item.get("payload", {})
+                            if cmd_type == "stop":
+                                logger.warning("command.stop received")
+                                stop_event.set()
+                            elif cmd_type == "restart":
+                                logger.warning("command.restart received")
+                                if _restart_self(config_path, logger):
+                                    if cmd_id:
+                                        _control_post(
+                                            f"{control_server}/api/agent/commands/ack/",
+                                            {"command_id": cmd_id, "status": "done"},
+                                            control_token,
+                                            timeout=8,
+                                        )
+                                    stop_event.set()
+                                    return
+                                logger.error("command.restart failed to relaunch self")
+                            elif cmd_type == "push_config":
+                                logger.info("command.push_config received")
+                                _apply_push_config(config_path, cmd_payload, logger, control_server, control_token, cmd_id)
+                            elif cmd_type == "activate":
+                                logger.info("command.activate received")
+                                if cmd_id:
                                     _control_post(
                                         f"{control_server}/api/agent/commands/ack/",
-                                        {"command_id": command_id, "status": "done"},
+                                        {"command_id": cmd_id, "status": "done"},
                                         control_token,
                                         timeout=8,
                                     )
-                                    command_acked = True
-                                stop_event.set()
-                                return
-                            logger.error("command.restart failed to relaunch self")
-                        elif command == "activate":
-                            logger.info("command.activate received")
-                        if command_id and not command_acked:
-                            _control_post(
-                                f"{control_server}/api/agent/commands/ack/",
-                                {"command_id": command_id, "status": "done"},
-                                control_token,
-                                timeout=8,
-                            )
                 except Exception as exc:
                     logger.warning("control poll failed error=%s", exc)
                 next_control = now + control_poll

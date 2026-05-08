@@ -9,8 +9,8 @@ class WindowsEventLogCollector(CollectorBase):
 
     def collect(self):
         channel = self.cfg.get("channel", "Security")
-        # Minimal collector: last 20 events as text via PowerShell.
-        # In production, move to win32evtlog subscription/bookmark mode.
+        if "\\" in channel or "/" in channel or channel.endswith("*"):
+            return []
         cmd = [
             "powershell",
             "-NoProfile",

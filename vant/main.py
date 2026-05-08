@@ -117,6 +117,7 @@ def build_collectors(cfg, logger):
             channels = win_cfg.get("channels", [])
             if isinstance(channels, str):
                 channels = [c.strip() for c in channels.split(",") if c.strip()]
+            channels = [c for c in channels if "\\" not in c and "/" not in c and not c.endswith("*")]
             if channels:
                 for ch in channels:
                     ch_cfg = dict(win_cfg)

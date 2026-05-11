@@ -13,15 +13,23 @@ class SuricataCollector(CollectorBase):
         self._offset = 0
         self._initialized = False
 
+    def _truncate_payload(self, payload, max_bytes=50 * 1024):
+        raw = json.dumps(payload, default=str)
+        if len(raw) > max_bytes:
+            return {"_truncated": True, "event_type": payload.get("event_type", ""), "timestamp": payload.get("timestamp", "")}
+        return payload
+
     def collect(self):
         path = Path(self.cfg.get("path", ""))
         if not path.exists():
             return []
-        if path.stat().st_size < self._offset:
-            self._offset = 0
-            self._initialized = False
 
         with path.open("rb") as fh:
+            fh_stat = fh.stat()
+            if fh_stat.st_size < self._offset:
+                self._offset = 0
+                self._initialized = False
+
             if not self._initialized:
                 self._initialized = True
                 if str(self.cfg.get("start_position", "end")).lower() == "end":
@@ -34,6 +42,7 @@ class SuricataCollector(CollectorBase):
 
         if not raw:
             return []
+        raw = raw[:512 * 1024]
         lines = raw.decode("utf-8", errors="ignore").splitlines()
         max_lines = int(self.cfg.get("max_lines_per_cycle", 600))
         if len(lines) > max_lines:
@@ -59,7 +68,7 @@ class SuricataCollector(CollectorBase):
                     "severity": str(payload.get("alert", {}).get("severity", "")),
                     "event_category": payload.get("event_type", "ids.event"),
                     "message": message[:1024],
-                    "raw_payload": payload,
+                    "raw_payload": self._truncate_payload(payload),
                     "tags": ["ids", "suricata"],
                 }
             )

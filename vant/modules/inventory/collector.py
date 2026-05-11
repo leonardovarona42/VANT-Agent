@@ -1,4 +1,5 @@
 import json
+import logging
 import platform
 import socket
 import subprocess
@@ -6,7 +7,8 @@ import subprocess
 
 def safe_json_command(cmd):
     try:
-        out = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        out = proc.stdout.strip()
         if not out:
             return []
         data = json.loads(out)
@@ -21,7 +23,8 @@ def safe_json_command(cmd):
 
 def safe_text_command(cmd):
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+        return proc.stdout.strip()
     except Exception:
         return ""
 

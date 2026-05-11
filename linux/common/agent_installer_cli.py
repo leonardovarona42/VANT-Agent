@@ -186,37 +186,35 @@ def _apply_agent_identity(cfg):
 def _apply_connection(cfg):
     output_cfg = _ensure_dict(cfg, "output")
     tls_cfg = _ensure_dict(output_cfg, "tls")
+    control_cfg = _ensure_dict(cfg, "control")
 
-    server_host = _prompt("Servidor VANT-SIEM IP", "192.168.12.43")
-    server_port = _prompt_int("Servidor VANT-SIEM Puerto", 8000, 1, 65535)
-    server_https = _prompt_bool("Usar HTTPS para VANT-SIEM", False)
-
-    opensearch_host = _prompt("OpenSearch IP", "192.168.12.43")
-    opensearch_port = _prompt_int("OpenSearch Puerto", 9201, 1, 65535)
+    server_url = _prompt("VANT-SIEM Server URL", "https://192.168.12.43")
+    server_url = server_url.rstrip("/")
     timeout = _prompt_int("Timeout (segundos)", output_cfg.get("timeout_seconds", 10), 1, 120)
 
-    tls_enabled = _prompt_bool("Habilitar TLS para OpenSearch", tls_cfg.get("enabled", False))
-    tls_verify = _prompt_bool("Verificar certificado TLS", tls_cfg.get("verify", False))
-    ca_cert = _prompt("Certificado CA", tls_cfg.get("ca_cert", ""))
-
-    scheme = "https" if tls_enabled else "http"
-    output_cfg["endpoint"] = f"{scheme}://{opensearch_host}:{opensearch_port}/api/v1/events/bulk"
-    output_cfg["source_endpoint"] = f"{scheme}://{opensearch_host}:{opensearch_port}/api/v1/sources/upsert"
+    # All services behind the same Nginx reverse proxy
+    is_https = server_url.startswith("https")
+    output_cfg["endpoint"] = f"{server_url}/logs/api/ingest/bulk/"
+    output_cfg["source_endpoint"] = f"{server_url}/logs/api/sources/"
     output_cfg["timeout_seconds"] = timeout
-    tls_cfg["enabled"] = bool(tls_enabled)
-    tls_cfg["verify"] = bool(tls_verify)
-    tls_cfg["ca_cert"] = ca_cert
+    tls_cfg["enabled"] = False
+    tls_cfg["verify"] = False
+    tls_cfg["ca_cert"] = ""
 
-    control_cfg = _ensure_dict(cfg, "control")
-    control_cfg["server_url"] = f"{'https' if server_https else 'http'}://{server_host}:{server_port}"
-    control_cfg["require_https"] = bool(server_https)
+    control_cfg["server_url"] = server_url
+    control_cfg["require_https"] = bool(is_https)
+    control_cfg["verify_ssl"] = False
     control_cfg["poll_seconds"] = int(control_cfg.get("poll_seconds", 30) or 30)
     control_cfg["inventory_seconds"] = int(control_cfg.get("inventory_seconds", 86400) or 86400)
+    control_cfg["dlp_poll_seconds"] = int(control_cfg.get("dlp_poll_seconds", 60) or 60)
+    control_cfg["dlp_scan_seconds"] = int(control_cfg.get("dlp_scan_seconds", 30) or 30)
+
+    # Ensure DLP and asset_audit sections exist
+    _ensure_dict(cfg, "aegis_dlp")
+    _ensure_dict(cfg, "asset_audit")
 
     return {
-        "server_host": server_host,
-        "server_port": server_port,
-        "server_https": server_https,
+        "server_url": server_url,
     }
 
 

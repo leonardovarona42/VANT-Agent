@@ -1,8 +1,12 @@
+from collections import OrderedDict
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 
 from collectors.base import CollectorBase
+
+
+_MAX_PROCESSED_IDS = 10000
 
 
 class FileLogCollector(CollectorBase):
@@ -12,16 +16,16 @@ class FileLogCollector(CollectorBase):
         super().__init__(cfg, agent_cfg)
         self._offsets = {}
         self._initialized = set()
-        self._processed_ids = {}
+        self._processed_ids = OrderedDict()
 
     def _collect_from_path(self, item):
         path_str = item.get("path", "")
-        path = Path(path_str)
+        path = Path(path_str).resolve()
         is_directory = item.get("type", "file") == "directory" or path_str.endswith("*")
 
         if is_directory:
             dir_path = path_str.rstrip("*").rstrip(" ").rstrip("\\").rstrip("/")
-            base_path = Path(dir_path) if dir_path else path.parent
+            base_path = Path(dir_path).resolve() if dir_path else path.parent
             if not base_path.is_dir():
                 return []
             files = []
@@ -87,30 +91,29 @@ class FileLogCollector(CollectorBase):
         event_id = obj.get("id") or obj.get("event_id")
         if event_id is None:
             return False
-        key = str(event_id)
-        if key in self._processed_ids:
-            return True
-        return False
+        return str(event_id) in self._processed_ids
 
     def _mark_as_processed(self, obj):
         event_id = obj.get("id") or obj.get("event_id")
         if event_id is not None:
-            self._processed_ids[str(event_id)] = True
+            key = str(event_id)
+            self._processed_ids[key] = True
+            while len(self._processed_ids) > _MAX_PROCESSED_IDS:
+                self._processed_ids.popitem(last=False)
 
     def _collect_from_file(self, path, item):
         key = str(path.resolve())
-        offset = int(self._offsets.get(key, 0))
-        try:
-            if path.stat().st_size < offset:
-                offset = 0
-                self._initialized.discard(key)
-        except Exception:
-            return []
-
-        is_json_file = path.suffix.lower() in ('.json', '.jsonl')
-
         try:
             with path.open("rb") as fh:
+                st = fh.stat()
+                current_size = st.st_size
+                offset = int(self._offsets.get(key, 0))
+                if current_size < offset:
+                    offset = 0
+                    self._initialized.discard(key)
+
+                is_json_file = path.suffix.lower() in ('.json', '.jsonl')
+
                 if key not in self._initialized:
                     self._initialized.add(key)
                     if str(item.get("start_position", "end")).lower() == "end":

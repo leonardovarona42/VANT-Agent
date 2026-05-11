@@ -13,6 +13,30 @@ server:
     verify: true
     ca_cert: ""
 
+output:
+  endpoint: ""
+  source_endpoint: ""
+  timeout_seconds: 10
+  auth:
+    mode: "none"
+    username: ""
+    password: ""
+    token: ""
+  tls:
+    enabled: false
+    verify: true
+    ca_cert: ""
+
+control:
+  server_url: ""
+  require_https: false
+  token: ""
+  poll_seconds: 30
+  verify_ssl: true
+  inventory_seconds: 86400
+  dlp_poll_seconds: 60
+  dlp_scan_seconds: 30
+
 agent:
   id: ""  # auto-generated if empty
   host_name: ""  # auto-detected if empty

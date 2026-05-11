@@ -124,6 +124,7 @@ def _detect_host():
     if ip.startswith("127.") or not ip:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(3)
                 s.connect(("8.8.8.8", 80))
                 ip = s.getsockname()[0]
         except Exception:
@@ -252,6 +253,7 @@ def _current_ips():
         pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(3)
             s.connect(("8.8.8.8", 80))
             ips.add(s.getsockname()[0])
     except Exception:
@@ -292,9 +294,9 @@ def run_with_stop(config_path, stop_event):
     dlp_enabled = bool((cfg.get("aegis_dlp", {}) or {}).get("enabled", True))
     inventory_service = AuditInventoryService(config_path) if inventory_enabled else None
     dlp_service = AegisDlpService(config_path, cfg) if dlp_enabled else None
-    inventory_seconds = int(control_cfg.get("inventory_seconds", 86400))
-    dlp_poll_seconds = int(control_cfg.get("dlp_poll_seconds", max(30, min(inventory_seconds, 120))))
-    dlp_scan_seconds = int(control_cfg.get("dlp_scan_seconds", max(30, min(inventory_seconds, 60))))
+    inventory_seconds = max(30, min(int(control_cfg.get("inventory_seconds", 86400)), 86400 * 7))
+    dlp_poll_seconds = max(10, min(int(control_cfg.get("dlp_poll_seconds", 60)), 3600))
+    dlp_scan_seconds = max(5, min(int(control_cfg.get("dlp_scan_seconds", 30)), 3600))
     next_control = time.time() + control_poll
     next_inventory = time.time()
     next_dlp_poll = time.time()
@@ -425,9 +427,9 @@ def run_with_stop(config_path, stop_event):
                                         control_token,
                                         timeout=8,
                                     )
+                    next_control = now + control_poll
                 except Exception as exc:
                     logger.warning("control poll failed error=%s", exc)
-                next_control = now + control_poll
 
             if control_server and inventory_service and now >= next_inventory:
                 try:
@@ -480,13 +482,8 @@ def run_with_stop(config_path, stop_event):
 
 
 def run(config_path):
-    class _Stop:
-        def is_set(self):
-            return False
-        def set(self):
-            return None
-
-    run_with_stop(config_path, _Stop())
+    stop_event = threading.Event()
+    run_with_stop(config_path, stop_event)
 
 
 def default_config_path():

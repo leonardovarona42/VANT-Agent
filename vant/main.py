@@ -71,6 +71,7 @@ def run_tray_mode(config_path):
 
         def _restart(self):
             self.stop.set()
+            self.worker.join(timeout=15)
             self._start_agent()
             QtWidgets.QMessageBox.information(None, "VANT Agent", "Agent restarted")
 
@@ -85,7 +86,7 @@ def run_tray_mode(config_path):
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("VANT-SIEM Agent")
     app.setQuitOnLastWindowClosed(False)
-    TrayApp(config_path)
+    _tray = TrayApp(config_path)
     sys.exit(app.exec())
 
 
@@ -94,7 +95,9 @@ def build_collectors(cfg, logger):
     collectors_cfg = cfg.get("collectors", {})
     agent_cfg = cfg.get("agent", {})
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _BASE_DIR = str(Path(__file__).resolve().parent.parent)
+    if _BASE_DIR not in sys.path:
+        sys.path.insert(0, _BASE_DIR)
 
     if collectors_cfg.get("snort", {}).get("enabled"):
         try:
@@ -215,6 +218,26 @@ def run_with_stop(config_path, stop_event):
         inv_service.register(client, logger)
 
     if inv_service and inv_service.agent_id:
+        agent_id = inv_service.agent_id
+        logger.info("agent registered id=%s", agent_id)
+        for c in collectors:
+            try:
+                client.upsert_source({
+                    "source_id": str(agent_id),
+                    "source_type": c.source_type,
+                    "host_name": agent_cfg.get("host_name", ""),
+                    "enabled": True,
+                    "meta": {
+                        "agent_id": str(agent_id),
+                        "host_name": agent_cfg.get("host_name", ""),
+                        "host_ip": agent_cfg.get("host_ip", ""),
+                        "agent_version": AGENT_VERSION,
+                        "collector": c.source_type,
+                    },
+                })
+            except Exception as e:
+                logger.warning("upsert_source failed: %s", e)
+
         logger.info("checking for pending config commands...")
         try:
             hb_data = inv_service.heartbeat(client, logger)
@@ -231,6 +254,8 @@ def run_with_stop(config_path, stop_event):
     cycle = 0
     next_inventory = time.time()
 
+    agent_id = inv_service.agent_id if inv_service else None
+
     while not stop_event.is_set():
         try:
             cycle += 1
@@ -240,6 +265,8 @@ def run_with_stop(config_path, stop_event):
                     events = collector.collect()
                     for ev in events:
                         _ensure_host_fields(ev, agent_cfg.get("host_name", ""), agent_cfg.get("host_ip", ""))
+                        if agent_id:
+                            ev["agent_id"] = agent_id
                     batch.extend(events)
                 except Exception as e:
                     logger.exception("collector failed source=%s", collector.source_type)
@@ -294,12 +321,8 @@ def run_with_stop(config_path, stop_event):
 
 
 def run(config_path):
-    class _Stop:
-        def is_set(self):
-            return False
-        def set(self):
-            return None
-    run_with_stop(config_path, _Stop())
+    import threading
+    run_with_stop(config_path, threading.Event())
 
 
 def main():

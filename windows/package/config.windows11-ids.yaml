@@ -4,8 +4,8 @@ agent:
   interval_seconds: 10
 
 output:
-  endpoint: "http://192.168.12.43:9201/api/v1/events/bulk"
-  source_endpoint: "http://192.168.12.43:9201/api/v1/sources/upsert"
+  endpoint: "https://192.168.12.43/logs/api/ingest/bulk/"
+  source_endpoint: "https://192.168.12.43/logs/api/sources/"
   timeout_seconds: 10
   auth:
     mode: "none"   # none|basic|token
@@ -18,10 +18,11 @@ output:
     ca_cert: ""
 
 control:
-  server_url: "http://192.168.12.43:8000"
-  require_https: false
+  server_url: "https://192.168.12.43"
+  require_https: true
   token: ""
   poll_seconds: 30
+  verify_ssl: false
   inventory_seconds: 86400
   dlp_poll_seconds: 60
   dlp_scan_seconds: 30

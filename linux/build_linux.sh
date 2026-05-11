@@ -70,6 +70,8 @@ prepare_venv() {
   deactivate
 }
 
+LINUX_AGENT_DIR="${AGENTS_DIR}/linux/agent"
+
 build_linux_binaries() {
   local venv_dir="$1"
   local build_root="$2"
@@ -88,13 +90,14 @@ build_linux_binaries() {
     --clean \
     --onefile \
     --name "vant-opensearch-agent" \
+    --paths "${LINUX_AGENT_DIR}" \
     --paths "${AGENTS_DIR}" \
     --hidden-import yaml \
     --hidden-import requests \
     --distpath "${dist_dir}" \
     --workpath "${work_dir}/agent" \
     --specpath "${spec_dir}" \
-    "${AGENTS_DIR}/agent.py" >/dev/null
+    "${LINUX_AGENT_DIR}/agent.py" >/dev/null
 
   "${pyinstaller_python}" -m PyInstaller \
     --noconfirm \
@@ -102,6 +105,7 @@ build_linux_binaries() {
     --onefile \
     --windowed \
     --name "vant-opensearch-agent-tray" \
+    --paths "${LINUX_AGENT_DIR}" \
     --paths "${AGENTS_DIR}" \
     --hidden-import agent \
     --hidden-import requests \
@@ -114,7 +118,7 @@ build_linux_binaries() {
     --distpath "${dist_dir}" \
     --workpath "${work_dir}/tray" \
     --specpath "${spec_dir}" \
-    "${AGENTS_DIR}/agent_tray.py" >/dev/null
+    "${LINUX_AGENT_DIR}/agent_tray.py" >/dev/null
 
   "${pyinstaller_python}" -m PyInstaller \
     --noconfirm \
@@ -376,11 +380,11 @@ stage_bundle() {
   build_linux_binaries "${venv_dir}" "${build_root}"
 
   info "Copying runtime files for ${distro}"
-  copy_tree "${AGENTS_DIR}/agent.py" "${stage_root}/agent/agent.py"
-  copy_tree "${AGENTS_DIR}/agent_tray.py" "${stage_root}/agent/agent_tray.py"
-  copy_tree "${AGENTS_DIR}/collectors" "${stage_root}/agent/collectors"
-  copy_tree "${AGENTS_DIR}/services" "${stage_root}/agent/services"
-  copy_tree "${AGENTS_DIR}/output.py" "${stage_root}/agent/output.py"
+  copy_tree "${LINUX_AGENT_DIR}/agent.py" "${stage_root}/agent/agent.py"
+  copy_tree "${LINUX_AGENT_DIR}/agent_tray.py" "${stage_root}/agent/agent_tray.py"
+  copy_tree "${LINUX_AGENT_DIR}/collectors" "${stage_root}/agent/collectors"
+  copy_tree "${LINUX_AGENT_DIR}/services" "${stage_root}/agent/services"
+  copy_tree "${LINUX_AGENT_DIR}/output.py" "${stage_root}/agent/output.py"
   copy_tree "${AGENTS_DIR}/opensearchcheck.py" "${stage_root}/agent/opensearchcheck.py"
   copy_tree "${AGENTS_DIR}/opensearchmover.py" "${stage_root}/agent/opensearchmover.py"
   copy_tree "${AGENTS_DIR}/requirements.txt" "${stage_root}/agent/requirements.txt"

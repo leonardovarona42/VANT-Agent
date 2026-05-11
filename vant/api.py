@@ -5,15 +5,35 @@ import requests
 class VantClient:
     def __init__(self, cfg):
         server = cfg.get("server", {})
-        self.base_url = server.get("url", "http://localhost:8000").rstrip("/")
-        self.logs_url = server.get("logs_url", "http://localhost:9201").rstrip("/")
-        self.auth_mode = server.get("auth_mode", "none")
-        self.token = server.get("auth_token", "")
-        self.username = server.get("auth_username", "")
-        self.password = server.get("auth_password", "")
-        self.timeout = int(server.get("timeout", 15))
+        control = cfg.get("control", {})
+        output = cfg.get("output", {})
 
-        tls = server.get("tls", {})
+        self.base_url = (
+            control.get("server_url", server.get("url", "http://localhost:8000"))
+            .rstrip("/")
+        )
+
+        logs_base = server.get("logs_url", "http://localhost:9201").rstrip("/")
+        self.ingest_endpoint = (
+            output.get("endpoint") or f"{logs_base}/logs/api/ingest/bulk/"
+        )
+        self.source_endpoint = (
+            output.get("source_endpoint") or f"{logs_base}/logs/api/sources/"
+        )
+
+        auth = output.get("auth", {}) or {}
+        self.auth_mode = auth.get("mode", server.get("auth_mode", "none"))
+        self.token = auth.get("token", server.get("auth_token", ""))
+        self.username = auth.get("username", server.get("auth_username", ""))
+        self.password = auth.get("password", server.get("auth_password", ""))
+
+        self.timeout = int(
+            output.get("timeout_seconds")
+            or control.get("timeout")
+            or server.get("timeout", 15)
+        )
+
+        tls = output.get("tls", server.get("tls", {})) or {}
         self.verify = tls.get("verify", True)
         ca = tls.get("ca_cert", "")
         if ca and os.path.isfile(ca):
@@ -44,8 +64,6 @@ class VantClient:
             verify=self.verify,
         )
 
-    # ---- Inventory Service (port 8003) ----
-
     def register_agent(self, data):
         return self._post(f"{self.base_url}/inventory/api/register/", data)
 
@@ -72,14 +90,12 @@ class VantClient:
         }
         return self._post(f"{self.base_url}/inventory/api/command-result/", payload)
 
-    # ---- Logs Service (port 9201) ----
-
     def ingest_logs(self, events):
         if not events:
             return {"ok": True, "inserted": 0}
-        resp = self._post(f"{self.logs_url}/logs/api/ingest/bulk/", {"events": events}, timeout=30)
+        resp = self._post(self.ingest_endpoint, {"events": events}, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
     def upsert_source(self, source):
-        return self._post(f"{self.logs_url}/logs/api/sources/", source)
+        return self._post(self.source_endpoint, source)

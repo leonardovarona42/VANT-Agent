@@ -16,11 +16,12 @@ class PostgresLogCollector(CollectorBase):
         path = Path(self.cfg.get("path", ""))
         if not path.exists():
             return []
-        if path.stat().st_size < self._offset:
-            self._offset = 0
-            self._initialized = False
 
         with path.open("rb") as fh:
+            fh_stat = fh.stat()
+            if fh_stat.st_size < self._offset:
+                self._offset = 0
+                self._initialized = False
             if not self._initialized:
                 self._initialized = True
                 if str(self.cfg.get("start_position", "end")).lower() == "end":
@@ -33,6 +34,7 @@ class PostgresLogCollector(CollectorBase):
 
         if not raw:
             return []
+        raw = raw[:512 * 1024]
         lines = raw.decode("utf-8", errors="ignore").splitlines()
         max_lines = int(self.cfg.get("max_lines_per_cycle", 400))
         if len(lines) > max_lines:

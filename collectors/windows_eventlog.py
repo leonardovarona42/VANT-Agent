@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 import subprocess
 
@@ -9,8 +10,8 @@ class WindowsEventLogCollector(CollectorBase):
 
     def collect(self):
         channel = self.cfg.get("channel", "Security")
-        # Minimal collector: last 20 events as text via PowerShell.
-        # In production, move to win32evtlog subscription/bookmark mode.
+        if not re.match(r'^[a-zA-Z0-9\- ]+$', channel):
+            return []
         cmd = [
             "powershell",
             "-NoProfile",
@@ -35,7 +36,7 @@ class WindowsEventLogCollector(CollectorBase):
                 "severity": "info",
                 "event_category": f"windows.eventlog.{channel.lower().replace(' ', '_')}",
                 "message": f"Collected {channel} events",
-                "raw_payload": {"channel": channel, "raw_json": result.stdout},
+                "raw_payload": {"channel": channel, "raw_json": result.stdout[:100 * 1024]},
                 "tags": ["windows", "eventlog", channel.lower().replace(" ", "_")],
             }
         ]

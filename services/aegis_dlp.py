@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -97,6 +98,10 @@ def _state_dir(config_path):
     base = Path(config_path).resolve().parent
     state_dir = base / ".agent_state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except Exception:
+        pass
     return state_dir
 
 
@@ -238,7 +243,7 @@ def _iter_files(paths, extensions, max_file_size, max_files_per_scan=12000):
             continue
         if not base_exists:
             continue
-        for root, dirs, files in os.walk(base, topdown=True, onerror=lambda _exc: None):
+        for root, dirs, files in os.walk(base, topdown=True, onerror=lambda exc: logging.getLogger("vant-siem-agent").warning("walk error: %s", exc)):
             root_path = Path(root)
             root_low = str(root_path).lower()
             if any(token in root_low for token in excluded_tokens):
@@ -272,8 +277,14 @@ def _read_file_text(path):
         if suffix in {".docx", ".xlsx", ".pptx"}:
             text_parts = []
             with ZipFile(path, "r") as zf:
+                total_size = 0
+                max_decompressed = 100 * 1024 * 1024
                 for member in zf.namelist():
                     if member.endswith(".xml"):
+                        info = zf.getinfo(member)
+                        total_size += info.file_size
+                        if total_size > max_decompressed:
+                            break
                         try:
                             text_parts.append(zf.read(member).decode("utf-8", errors="ignore"))
                         except Exception:
@@ -330,12 +341,14 @@ def _sha256(path):
 def _file_owner(path):
     if os.name != "nt":
         return ""
-    command = (
-        'powershell -NoProfile -Command '
-        f'"(Get-Acl -LiteralPath \'{str(path).replace("\'","\'\'")}\').Owner"'
-    )
     try:
-        return subprocess.check_output(command, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "& {param($p) (Get-Acl -LiteralPath $p).Owner}",
+             "-p", str(path)],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
     except Exception:
         return ""
 

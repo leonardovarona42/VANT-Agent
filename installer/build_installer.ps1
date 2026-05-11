@@ -1,10 +1,8 @@
 # VANT-Agent Builder
-# 1. Builds VANT-Agent.exe (the agent)
-# 2. Builds VANT-Agent-Setup.exe (GUI installer wizard with embedded agent)
+# Builds VANT-Agent-Setup.exe (GUI installer wizard with embedded agent)
 
 $RootDir = Split-Path $PSScriptRoot -Parent
 $DistDir = Join-Path $RootDir "dist"
-$ReleaseDir = Join-Path $DistDir "release"
 $VenvPython = "C:\Users\SysAdmin\Documents\develop\venv-schrodinger\Scripts\python.exe"
 
 Write-Host ""
@@ -46,22 +44,25 @@ foreach ($d in @("build", "build-setup")) {
 }
 Get-ChildItem $RootDir -Filter "*.spec" | Remove-Item -Force
 Get-ChildItem $RootDir -Filter "*.spec" -Recurse | Remove-Item -Force
-Remove-Item -Path "$DistDir\VANT-Agent.exe" -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "$DistDir\VANT-Agent-Setup.exe" -Force -ErrorAction SilentlyContinue
 Write-Host "  Done" -ForegroundColor Green
 
-# --- Step 4: Build VANT-Agent.exe ---
-Write-Host "`n[4/5] Building VANT-Agent.exe..." -ForegroundColor Yellow
+# --- Step 4: Build VANT-Agent.exe (intermediate) ---
+Write-Host "`n[4/5] Building VANT-Agent component..." -ForegroundColor Yellow
+
+$AgentBuildDir = Join-Path $RootDir "build-agent"
+$AgentDistDir = Join-Path $RootDir "dist-agent"
 
 Set-Location $RootDir
 
 & $PythonExe -m PyInstaller `
     --name VANT-Agent `
     --onefile `
-    --console `
+    --windowed `
+    --icon vant.ico `
     --clean `
-    --distpath dist `
-    --workpath build `
+    --distpath $AgentDistDir `
+    --workpath $AgentBuildDir `
     --add-data "config.example.yaml;." `
     --hidden-import yaml `
     --hidden-import requests `
@@ -76,27 +77,28 @@ Set-Location $RootDir
     --hidden-import vant.modules.collectors.suricata `
     --hidden-import vant.modules.collectors.snort `
     --hidden-import vant.modules.dlp.aegis `
+    --hidden-import jaraco.text `
+    --hidden-import jaraco.functools `
+    --hidden-import jaraco.context `
     --exclude-module pytest `
-    --exclude-module setuptools `
     run.py
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ERROR: Agent build failed" -ForegroundColor Red
+    Write-Host "  ERROR: Agent component build failed" -ForegroundColor Red
     exit 1
 }
 
-$AgentExe = Join-Path $DistDir "VANT-Agent.exe"
+$AgentExe = Join-Path $AgentDistDir "VANT-Agent.exe"
 if (-not (Test-Path $AgentExe)) {
     Write-Host "  ERROR: VANT-Agent.exe not found" -ForegroundColor Red
     exit 1
 }
 
 $AgentSizeMB = [math]::Round((Get-Item $AgentExe).Length / 1MB, 1)
-Write-Host ""
-Write-Host "  VANT-Agent.exe built ($AgentSizeMB MB)" -ForegroundColor Green
+Write-Host "  Agent component built ($AgentSizeMB MB)" -ForegroundColor Green
 
-# --- Step 5: Build VANT-Agent-Setup.exe (GUI installer) ---
-Write-Host "`n[5/5] Building VANT-Agent-Setup.exe (GUI Installer)..." -ForegroundColor Yellow
+# --- Step 5: Build VANT-Agent-Setup.exe (final installer) ---
+Write-Host "`n[5/5] Building VANT-Agent-Setup.exe..." -ForegroundColor Yellow
 
 $InstallerScript = Join-Path (Join-Path $RootDir "installer") "agent_installer.py"
 $Logo = Join-Path $RootDir "windows\package\staticfiles\img\logo.png"
@@ -105,8 +107,9 @@ $Logo = Join-Path $RootDir "windows\package\staticfiles\img\logo.png"
     --name VANT-Agent-Setup `
     --onefile `
     --windowed `
+    --icon vant.ico `
     --clean `
-    --distpath dist `
+    --distpath $DistDir `
     --workpath build-setup `
     --add-data "$AgentExe;." `
     --add-data "$Logo;." `
@@ -127,6 +130,11 @@ if (-not (Test-Path $SetupExe)) {
     exit 1
 }
 
+# Clean up intermediate agent build artifacts
+Remove-Item $AgentBuildDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $AgentDistDir -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $RootDir -Filter "*.spec" | Remove-Item -Force
+
 $SetupSizeMB = [math]::Round((Get-Item $SetupExe).Length / 1MB, 1)
 
 Write-Host ""
@@ -134,8 +142,5 @@ Write-Host "================================================================" -F
 Write-Host "  Build Complete!" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Agent:           $AgentExe ($AgentSizeMB MB)" -ForegroundColor White
-Write-Host "  Setup Installer: $SetupExe ($SetupSizeMB MB)" -ForegroundColor White
-Write-Host ""
-Write-Host "  To test: Run VANT-Agent-Setup.exe" -ForegroundColor Yellow
-Write-Host ""
+Write-Host "  VANT-Agent-Setup.exe ($SetupSizeMB MB)" -ForegroundColor White
+Write-Host "  Location: $SetupExe" -ForegroundColor White

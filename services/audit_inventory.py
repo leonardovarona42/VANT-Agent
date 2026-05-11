@@ -15,8 +15,8 @@ def _utc_now():
 
 def _safe_json_command(command):
     try:
-        out = subprocess.check_output(command, shell=True, text=True, stderr=subprocess.DEVNULL)
-        out = out.strip()
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        out = proc.stdout.strip()
         if not out:
             return []
         data = json.loads(out)
@@ -31,7 +31,8 @@ def _safe_json_command(command):
 
 def _safe_text_command(command):
     try:
-        return subprocess.check_output(command, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        return proc.stdout.strip()
     except Exception:
         return ""
 
@@ -40,6 +41,10 @@ def _state_dir(config_path):
     base = Path(config_path).resolve().parent
     state_dir = base / ".agent_state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except Exception:
+        pass
     return state_dir
 
 

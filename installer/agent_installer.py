@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QLineEdit, QPushButton, QProgressBar, QTextEdit,
@@ -25,9 +27,12 @@ from PyQt6.QtGui import QFont
 
 _VERSION = "1.1.0"
 
-# Default service URLs
-DEFAULT_INVENTORY_URL = "http://localhost:8003"
-DEFAULT_LOGS_URL = "http://localhost:9201"
+# Default VANT-SIEM server URL (direct Django server, not through nginx)
+DEFAULT_SERVER_URL = "http://192.168.12.43:8000"
+
+# Pre-configured API credentials for agent authentication
+AGENT_API_USER = "agent_api"
+AGENT_API_PASS = "VantAgent2024!"
 
 
 def _map_os_type():
@@ -74,43 +79,26 @@ def _get_local_ip():
 class ConnectionTestThread(QThread):
     result = pyqtSignal(bool, dict)
 
-    def __init__(self, inventory_url, logs_url):
+    def __init__(self, server_url):
         super().__init__()
-        self.inventory_url = inventory_url.rstrip("/")
-        self.logs_url = logs_url.rstrip("/")
+        self.server_url = server_url.rstrip("/")
 
     def run(self):
-        results = {"inventory": (False, ""), "logs": (False, "")}
+        results = {"control": (False, ""), "logs": (False, ""), "dlp": (False, "")}
         all_ok = True
+        auth = (AGENT_API_USER, AGENT_API_PASS)
 
-        try:
-            r = requests.get(f"{self.inventory_url}/inventory/api/health/", timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                status = data.get("status", "unknown")
-                db = data.get("database", "unknown")
-                agents = data.get("total_agents", 0)
-                results["inventory"] = (True, f"Inventory: {status} (DB: {db}, Agents: {agents})")
-            else:
+        for name, path in [("control", "/inventory/api/health/"), ("logs", "/logs/api/health/"), ("dlp", "/aegis/api/agent/dlp/config/")]:
+            try:
+                r = requests.get(f"{self.server_url}{path}", timeout=5, verify=False, auth=auth)
+                if r.status_code in (200, 302):
+                    results[name] = (True, f"{name.title()}: OK (HTTP {r.status_code})")
+                else:
+                    all_ok = False
+                    results[name] = (False, f"{name.title()}: HTTP {r.status_code}")
+            except Exception as e:
                 all_ok = False
-                results["inventory"] = (False, f"HTTP {r.status_code}")
-        except Exception as e:
-            all_ok = False
-            results["inventory"] = (False, f"Connection failed: {e}")
-
-        try:
-            r = requests.get(f"{self.logs_url}/logs/api/health/", timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                status = data.get("status", "unknown")
-                db = data.get("database", "unknown")
-                results["logs"] = (True, f"Logs: {status} (DB: {db})")
-            else:
-                all_ok = False
-                results["logs"] = (False, f"HTTP {r.status_code}")
-        except Exception as e:
-            all_ok = False
-            results["logs"] = (False, f"Connection failed: {e}")
+                results[name] = (False, f"{name.title()}: {e}")
 
         self.result.emit(all_ok, results)
 
@@ -118,9 +106,9 @@ class ConnectionTestThread(QThread):
 class EnrollmentThread(QThread):
     result = pyqtSignal(bool, dict, str)
 
-    def __init__(self, inventory_url, hostname, mac, os_type, os_version, os_arch, ip_address):
+    def __init__(self, server_url, hostname, mac, os_type, os_version, os_arch, ip_address):
         super().__init__()
-        self.inventory_url = inventory_url.rstrip("/")
+        self.server_url = server_url.rstrip("/")
         self.hostname = hostname
         self.mac = mac
         self.os_type = os_type
@@ -141,9 +129,10 @@ class EnrollmentThread(QThread):
                 "machine_name": self.hostname,
             }
             r = requests.post(
-                f"{self.inventory_url}/inventory/api/register/",
+                f"{self.server_url}/inventory/api/register/",
                 json=payload,
                 timeout=10,
+                verify=False,
             )
             try:
                 resp_data = r.json()
@@ -202,31 +191,47 @@ class InstallerThread(QThread):
                     break
 
             self.progress.emit(45, "Generating configuration...")
+            server_base = self.config["server_url"].rstrip("/")
             config_data = {
                 "agent": {
-                    "name": "VANT-SIEM Agent",
-                    "version": _VERSION,
-                    "log_file": str(Path(self.install_dir) / "logs" / "agent.log"),
-                    "log_level": "INFO",
-                    "check_interval": 60,
-                    "heartbeat_interval": 300,
-                    "agent_id": self.config.get("agent_id", ""),
+                    "id": self.config.get("agent_id", "agent-windows"),
+                    "host_name": self.config.get("_hostname", ""),
+                    "interval_seconds": 10,
                 },
                 "server": {
-                    "url": self.config["inventory_url"],
-                    "logs_url": self.config["logs_url"],
-                    "auth": {"mode": "none"},
-                    "tls": {"verify": True},
-                },
-                "inventory": {
-                    "enabled": True,
-                    "interval": 300,
+                    "url": server_base,
+                    "logs_url": server_base,
+                    "auth_mode": "basic",
+                    "auth_username": AGENT_API_USER,
+                    "auth_password": AGENT_API_PASS,
+                    "timeout": 15,
+                    "tls": {"verify": False},
                 },
                 "collectors": {
                     "windows_eventlog": {
                         "enabled": True,
                         "channels": ["Application", "Security", "System"],
                     }
+                },
+                "asset_audit": {
+                    "enabled": True,
+                },
+                "aegis_dlp": {
+                    "enabled": True,
+                    "max_file_size_mb": 25,
+                    "max_files_per_scan": 12000,
+                    "max_scan_seconds": 20,
+                    "scan_paths": [],
+                    "monitored_extensions": [
+                        ".txt", ".log", ".csv", ".json", ".xml", ".md",
+                        ".doc", ".docx", ".docm", ".rtf",
+                        ".xls", ".xlsx", ".xlsm",
+                        ".ppt", ".pptx", ".pptm",
+                        ".pdf", ".ps1", ".bat", ".cmd",
+                        ".sql", ".env", ".properties",
+                        ".html", ".htm",
+                        ".conf", ".ini", ".odt", ".ods", ".odp",
+                    ],
                 },
             }
 
@@ -277,13 +282,14 @@ class InstallerThread(QThread):
 
             self.progress.emit(98, "Launching agent...")
             try:
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     [str(dst_exe), "--tray", "--config", str(config_path)],
                     cwd=self.install_dir,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
                 )
-            except Exception:
-                pass
+                self._agent_pid = proc.pid
+            except Exception as e:
+                self.finished.emit(False, f"Agent installation completed but failed to launch: {e}")
+                return
 
             time.sleep(0.5)
             self.progress.emit(100, "Installation complete!")
@@ -353,25 +359,16 @@ class ServerConfigPage(WizardPage):
 
         self.layout.addSpacing(15)
 
-        group_inv = QGroupBox("Inventory Service (port 8003)")
-        group_inv.setFont(QFont("Segoe UI", 10))
-        form_inv = QFormLayout()
-        self.inventory_url = QLineEdit(DEFAULT_INVENTORY_URL)
-        self.inventory_url.setFont(QFont("Consolas", 10))
-        form_inv.addRow("URL:", self.inventory_url)
-        group_inv.setLayout(form_inv)
-        self.layout.addWidget(group_inv)
+        group_server = QGroupBox("VANT-SIEM Server")
+        group_server.setFont(QFont("Segoe UI", 10))
+        form_server = QFormLayout()
+        self.server_url = QLineEdit(DEFAULT_SERVER_URL)
+        self.server_url.setFont(QFont("Consolas", 10))
+        form_server.addRow("URL:", self.server_url)
+        group_server.setLayout(form_server)
+        self.layout.addWidget(group_server)
 
-        group_logs = QGroupBox("Logs Service (port 9201)")
-        group_logs.setFont(QFont("Segoe UI", 10))
-        form_logs = QFormLayout()
-        self.logs_url = QLineEdit(DEFAULT_LOGS_URL)
-        self.logs_url.setFont(QFont("Consolas", 10))
-        form_logs.addRow("URL:", self.logs_url)
-        group_logs.setLayout(form_logs)
-        self.layout.addWidget(group_logs)
-
-        hint = QLabel("For remote servers, replace localhost with the server IP or hostname.")
+        hint = QLabel("Enter the VANT-SIEM server URL (Nginx reverse proxy). The installer will configure all services (control, logs, DLP) to use this single endpoint.")
         hint.setFont(QFont("Segoe UI", 9))
         hint.setStyleSheet("color: #80868b;")
         hint.setWordWrap(True)
@@ -394,10 +391,8 @@ class ServerConfigPage(WizardPage):
         self.layout.addWidget(self.status_label)
 
     def validate(self):
-        if not self.inventory_url.text().strip():
-            return False, "Inventory Service URL is required"
-        if not self.logs_url.text().strip():
-            return False, "Logs Service URL is required"
+        if not self.server_url.text().strip():
+            return False, "VANT-SIEM Server URL is required"
         return True, ""
 
 
@@ -597,8 +592,7 @@ class InstallerWindow(QMainWindow):
             if not ok:
                 QMessageBox.warning(self, "Validation Error", msg)
                 return
-            self.config["inventory_url"] = self.server_page.inventory_url.text().strip()
-            self.config["logs_url"] = self.server_page.logs_url.text().strip()
+            self.config["server_url"] = self.server_page.server_url.text().strip()
         elif idx == 4:
             self.close()
             return
@@ -612,17 +606,16 @@ class InstallerWindow(QMainWindow):
         self._go_to_page(self.stack.currentIndex() - 1)
 
     def _test_connection(self):
-        inv_url = self.server_page.inventory_url.text().strip()
-        logs_url = self.server_page.logs_url.text().strip()
-        if not inv_url or not logs_url:
-            QMessageBox.warning(self, "Error", "Please fill in both service URLs.")
+        server_url = self.server_page.server_url.text().strip()
+        if not server_url:
+            QMessageBox.warning(self, "Error", "Please fill in the server URL.")
             return
 
         self.server_page.test_btn.setEnabled(False)
         self.server_page.test_btn.setText("Testing...")
         self.server_page.status_label.setText("")
 
-        self._conn_thread = ConnectionTestThread(inv_url, logs_url)
+        self._conn_thread = ConnectionTestThread(server_url)
         self._conn_thread.result.connect(self._on_conn_result)
         self._conn_thread.start()
 
@@ -663,9 +656,9 @@ class InstallerWindow(QMainWindow):
         self.config["_hostname"] = hostname
         self.config["_mac"] = mac
 
-        inv_url = self.config.get("inventory_url", "N/A")
+        srv = self.config.get("server_url", "N/A")
         self.enrollment_page.info_label.setText(
-            f"Ready to enroll with: {inv_url}"
+            f"Ready to enroll with: {srv}"
         )
 
     def _enroll(self):
@@ -674,7 +667,7 @@ class InstallerWindow(QMainWindow):
         self.enrollment_page.info_label.setText("Sending registration request...")
 
         self._enroll_thread = EnrollmentThread(
-            self.config["inventory_url"],
+            self.config["server_url"],
             self.config.get("_hostname", _get_hostname()),
             self.config.get("_mac", _get_mac()),
             self.config["_os_type"],
@@ -724,8 +717,7 @@ class InstallerWindow(QMainWindow):
         if ok:
             summary = (
                 f"Installation Directory: {self.install_page.install_dir.text()}\n"
-                f"Inventory Service: {self.config.get('inventory_url', 'N/A')}\n"
-                f"Logs Service: {self.config.get('logs_url', 'N/A')}\n"
+                f"Server URL: {self.config.get('server_url', 'N/A')}\n"
                 f"Agent ID: {self.config.get('agent_id', 'N/A')}\n"
                 f"Status: {msg}"
             )

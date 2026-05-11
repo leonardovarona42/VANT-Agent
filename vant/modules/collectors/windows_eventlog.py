@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 import subprocess
 
@@ -9,7 +10,7 @@ class WindowsEventLogCollector(CollectorBase):
 
     def collect(self):
         channel = self.cfg.get("channel", "Security")
-        if "\\" in channel or "/" in channel or channel.endswith("*"):
+        if not re.match(r'^[a-zA-Z0-9\- ]+$', channel):
             return []
         cmd = [
             "powershell",
@@ -35,7 +36,7 @@ class WindowsEventLogCollector(CollectorBase):
                 "severity": "info",
                 "event_category": f"windows.eventlog.{channel.lower().replace(' ', '_')}",
                 "message": f"Collected {channel} events",
-                "raw_payload": {"channel": channel, "raw_json": result.stdout},
+                "raw_payload": {"channel": channel, "raw_json": result.stdout[:100 * 1024]},
                 "tags": ["windows", "eventlog", channel.lower().replace(" ", "_")],
             }
         ]

@@ -16,6 +16,7 @@ def detect_host():
     if ip.startswith("127.") or not ip:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(3)
                 s.connect(("8.8.8.8", 80))
                 ip = s.getsockname()[0]
         except Exception:
@@ -31,6 +32,7 @@ def get_current_ips():
         pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(3)
             s.connect(("8.8.8.8", 80))
             ips.add(s.getsockname()[0])
     except Exception:
@@ -54,6 +56,7 @@ def configure_logging(cfg, config_path):
 
     logger = logging.getLogger("vant-agent")
     logger.setLevel(level)
+    logger.handlers.clear()
 
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)s %(message)s",
@@ -67,7 +70,7 @@ def configure_logging(cfg, config_path):
     fh.setLevel(level)
     logger.addHandler(fh)
 
-    sh = logging.StreamHandler(sys.stdout)
+    sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     sh.setLevel(level)
     logger.addHandler(sh)

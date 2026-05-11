@@ -12,7 +12,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+import urllib3
 import yaml
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DEFAULT_AGENT_SHARED_SECRET = "VANT-SIEM-AGENT-BOOTSTRAP-2026"
 
@@ -83,14 +86,22 @@ def _auth_headers(config):
     return {}
 
 
+def _verify_ssl(config):
+    control = config.get("control", {}) or {}
+    verify = control.get("verify_ssl", True)
+    if isinstance(verify, bool):
+        return verify
+    return str(verify).lower() in ("1", "true", "yes")
+
+
 def _build_bootstrap_url(config):
     server_url = _api_url(config)
-    return f"{server_url}/api/agent/bootstrap/" if server_url else ""
+    return f"{server_url}/inventory/api/agent/bootstrap/" if server_url else ""
 
 
 def _build_enroll_url(config):
     server_url = _api_url(config)
-    return f"{server_url}/api/agent/enroll/" if server_url else ""
+    return f"{server_url}/inventory/api/agent/enroll/" if server_url else ""
 
 
 def _owner_account():
@@ -139,6 +150,7 @@ def _fetch_bootstrap_secret(config, agent_id):
             url,
             headers={"X-Agent-Id": agent_id},
             timeout=8,
+            verify=_verify_ssl(config),
         )
         if "application/json" not in response.headers.get("Content-Type", ""):
             return ""
@@ -231,11 +243,15 @@ def enroll_agent(config_path=None, bootstrap_key="", enrollment_code="", backup=
         shared_secret = DEFAULT_AGENT_SHARED_SECRET
 
     payload = _build_enrollment_payload(config, shared_secret, enrollment_code)
-    response = requests.post(_build_enroll_url(config), json=payload, timeout=8)
+    response = requests.post(_build_enroll_url(config), json=payload, timeout=8, verify=_verify_ssl(config))
     data = response.json() if "application/json" in response.headers.get("Content-Type", "") else {}
     if response.status_code != 200 or not data.get("ok") or not data.get("token"):
         error = data.get("error") or response.text or f"Enrollment failed with status {response.status_code}"
         raise SystemExit(error)
+
+    server_agent_id = data.get("agent_id", "")
+    if server_agent_id:
+        agent["id"] = server_agent_id
 
     auth["mode"] = "token"
     auth["token"] = data.get("token", "")

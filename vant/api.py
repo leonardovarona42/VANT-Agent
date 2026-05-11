@@ -99,3 +99,7 @@ class VantClient:
 
     def upsert_source(self, source):
         return self._post(self.source_endpoint, source)
+
+    def upload_screenshot(self, agent_id, image_b64):
+        payload = {"agent_id": str(agent_id), "image": image_b64}
+        return self._post(f"{self.base_url}/inventory/api/screen/upload/", payload, timeout=30)

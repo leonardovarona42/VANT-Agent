@@ -67,7 +67,10 @@ def run_tray_mode(config_path):
             self.worker.start()
 
         def _run(self, stop_ev):
-            run_with_stop(self.config_path, stop_ev)
+            while not stop_ev.is_set():
+                reason = run_with_stop(self.config_path, stop_ev)
+                if stop_ev.is_set() or reason != "restart":
+                    break
 
         def _restart(self):
             self.stop.set()
@@ -176,7 +179,7 @@ def run_with_stop(config_path, stop_event):
 
     client = VantClient(cfg)
     collectors = build_collectors(cfg, logger)
-    interval = int(agent_cfg.get("check_interval", 60))
+    interval = int(agent_cfg.get("interval_seconds") or agent_cfg.get("check_interval") or 60)
     log_every = int(agent_cfg.get("log_every_cycles", 60))
 
     inv_cfg = cfg.get("inventory", {})
@@ -187,6 +190,7 @@ def run_with_stop(config_path, stop_event):
     inv_interval = int(inv_cfg.get("interval", 300))
 
     hb_service = HeartbeatService(cfg, logger)
+    screen_service = None
 
     logger.info(
         "agent.starting version=%s host=%s ip=%s interval=%ss collectors=%s",
@@ -220,6 +224,12 @@ def run_with_stop(config_path, stop_event):
     if inv_service and inv_service.agent_id:
         agent_id = inv_service.agent_id
         logger.info("agent registered id=%s", agent_id)
+        try:
+            from vant.modules.screen.service import ScreenCaptureService
+            screen_service = ScreenCaptureService(cfg, client, agent_id, logger)
+            logger.info("screen.service initialized")
+        except Exception as e:
+            logger.warning("screen.service init error=%s", e)
         for c in collectors:
             try:
                 client.upsert_source({
@@ -242,15 +252,24 @@ def run_with_stop(config_path, stop_event):
         try:
             hb_data = inv_service.heartbeat(client, logger)
             if hb_data:
-                result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger)
+                result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger, screen_service=screen_service)
                 if result == "reload":
                     cfg = load_config(config_path)
                     cfg["_config_path"] = config_path
+                    agent_cfg = cfg.get("agent", {})
                     collectors = build_collectors(cfg, logger)
+                    interval = int(agent_cfg.get("check_interval") or agent_cfg.get("interval_seconds") or 60)
                     logger.info("config.applied and collectors rebuilt on startup")
+                elif result in ("restart", "stop"):
+                    logger.info("command.%s at startup, exiting", result)
+                    if screen_service:
+                        screen_service.stop()
+                    logger.info("agent.stopped")
+                    return result
         except Exception as e:
             logger.warning("startup config check error=%s", e)
 
+    exit_reason = None
     cycle = 0
     next_inventory = time.time()
 
@@ -292,37 +311,44 @@ def run_with_stop(config_path, stop_event):
                 try:
                     hb_data = inv_service.heartbeat(client, logger)
                     if hb_data:
-                        result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger)
+                        result = hb_service.process_commands(hb_data, inv_service, client, logger, config_path, logger, screen_service=screen_service)
                         if result == "reload":
                             cfg = load_config(config_path)
                             cfg["_config_path"] = config_path
+                            agent_cfg = cfg.get("agent", {})
                             collectors = build_collectors(cfg, logger)
+                            interval = int(agent_cfg.get("interval_seconds") or agent_cfg.get("check_interval") or 60)
                             inv_cfg = cfg.get("inventory", {})
                             if inv_cfg.get("enabled"):
                                 inv_interval = int(inv_cfg.get("interval", 300))
                             logger.info("config.applied and collectors rebuilt")
-                        elif result == "stop":
-                            stop_event.set()
+                        elif result in ("restart", "stop"):
+                            exit_reason = result
+                            if result == "stop":
+                                stop_event.set()
                             break
-                except SystemExit:
-                    raise
                 except Exception as e:
                     logger.warning("heartbeat error=%s", e)
 
             sleep_with_stop(stop_event, interval)
 
-        except SystemExit:
-            break
         except Exception as e:
             logger.exception("agent.loop crashed error=%s", e)
             sleep_with_stop(stop_event, 5)
 
+    if screen_service:
+        screen_service.stop()
     logger.info("agent.stopped")
+    return exit_reason
 
 
 def run(config_path):
     import threading
-    run_with_stop(config_path, threading.Event())
+    while True:
+        stop_ev = threading.Event()
+        reason = run_with_stop(config_path, stop_ev)
+        if stop_ev.is_set() or reason != "restart":
+            break
 
 
 def main():

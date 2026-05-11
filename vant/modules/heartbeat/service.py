@@ -8,7 +8,7 @@ class HeartbeatService:
         self.logger = logger
         self.interval = config.get("agent", {}).get("heartbeat_interval", 300)
 
-    def process_commands(self, heartbeat_data, inventory_service, client, logger, config_path, app_logger):
+    def process_commands(self, heartbeat_data, inventory_service, client, logger, config_path, app_logger, screen_service=None):
         if not heartbeat_data:
             return
         commands = heartbeat_data.get("commands", [])
@@ -35,11 +35,25 @@ class HeartbeatService:
             elif cmd_type == "restart_agent":
                 logger.warning("command.restart received")
                 client.send_command_result(cmd_id, "completed")
-                raise SystemExit("Restart requested by server")
+                return "restart"
             elif cmd_type == "stop_agent":
                 logger.warning("command.stop received")
                 client.send_command_result(cmd_id, "completed")
                 return "stop"
+            elif cmd_type == "start_screen_share":
+                logger.info("command.start_screen_share received")
+                if screen_service:
+                    screen_service.start()
+                    client.send_command_result(cmd_id, "completed", {"status": "screen_sharing_started"})
+                else:
+                    client.send_command_result(cmd_id, "failed", {"error": "screen_service_unavailable"})
+            elif cmd_type == "stop_screen_share":
+                logger.info("command.stop_screen_share received")
+                if screen_service:
+                    screen_service.stop()
+                    client.send_command_result(cmd_id, "completed", {"status": "screen_sharing_stopped"})
+                else:
+                    client.send_command_result(cmd_id, "failed", {"error": "screen_service_unavailable"})
             elif cmd_type == "update_agent":
                 logger.info("command.update_agent received")
                 client.send_command_result(cmd_id, "completed", {"status": "not_implemented"})

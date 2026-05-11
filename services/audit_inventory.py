@@ -4,9 +4,10 @@ import os
 import platform
 import re
 import socket
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from vant.utils import run_hidden
 
 
 def _utc_now():
@@ -15,7 +16,7 @@ def _utc_now():
 
 def _safe_json_command(command):
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        proc = run_hidden(command, capture_output=True, text=True, timeout=30, check=False)
         out = proc.stdout.strip()
         if not out:
             return []
@@ -31,7 +32,7 @@ def _safe_json_command(command):
 
 def _safe_text_command(command):
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        proc = run_hidden(command, capture_output=True, text=True, timeout=15, check=False)
         return proc.stdout.strip()
     except Exception:
         return ""

@@ -1,7 +1,7 @@
 import re
 from datetime import datetime, timezone
-import subprocess
 
+from vant.utils import run_hidden
 from collectors.base import CollectorBase
 
 
@@ -20,7 +20,7 @@ class WindowsEventLogCollector(CollectorBase):
             "Select-Object TimeCreated, Id, LevelDisplayName, Message | ConvertTo-Json -Depth 3",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False)
+            result = run_hidden(cmd, capture_output=True, text=True, timeout=8, check=False)
             if result.returncode != 0 or not result.stdout.strip():
                 return []
         except Exception:

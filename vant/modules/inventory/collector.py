@@ -2,12 +2,13 @@ import json
 import logging
 import platform
 import socket
-import subprocess
+
+from vant.utils import run_hidden
 
 
 def safe_json_command(cmd):
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        proc = run_hidden(cmd, capture_output=True, text=True, timeout=30, check=False)
         out = proc.stdout.strip()
         if not out:
             return []
@@ -23,7 +24,7 @@ def safe_json_command(cmd):
 
 def safe_text_command(cmd):
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+        proc = run_hidden(cmd, capture_output=True, text=True, timeout=15, check=False)
         return proc.stdout.strip()
     except Exception:
         return ""

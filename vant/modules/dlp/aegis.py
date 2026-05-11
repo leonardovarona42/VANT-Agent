@@ -4,11 +4,12 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile, BadZipFile
+
+from vant.utils import run_hidden
 
 import requests
 
@@ -483,7 +484,7 @@ def _file_owner(path):
     if os.name != "nt":
         return ""
     try:
-        proc = subprocess.run(
+        proc = run_hidden(
             ["powershell", "-NoProfile", "-Command",
              "& {param($p) (Get-Acl -LiteralPath $p).Owner}",
              "-p", str(path)],

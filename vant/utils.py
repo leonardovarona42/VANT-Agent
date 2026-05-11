@@ -1,9 +1,36 @@
 import logging
 import os
 import socket
+import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+def _hide_window():
+    kwargs = {}
+    if sys.platform.startswith("win"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        kwargs["startupinfo"] = si
+    return kwargs
+
+
+def popen_hidden(*args, **kwargs):
+    kwargs.update(_hide_window())
+    return subprocess.Popen(*args, **kwargs)
+
+
+def run_hidden(*args, **kwargs):
+    kwargs.update(_hide_window())
+    return subprocess.run(*args, **kwargs)
+
+
+def check_output_hidden(*args, **kwargs):
+    kwargs.update(_hide_window())
+    return subprocess.check_output(*args, **kwargs)
 
 
 def detect_host():
@@ -135,8 +162,7 @@ def get_mac_address():
     import platform
     if platform.system() == "Windows":
         try:
-            import subprocess
-            out = subprocess.check_output(
+            out = check_output_hidden(
                 ["powershell", "-NoProfile", "-Command",
                  "(Get-NetAdapter | Where-Object {$_.Status -eq 'Up' -and $_.MacAddress -ne $null} | Select-Object -First 1).MacAddress"],
                 text=True, stderr=subprocess.DEVNULL

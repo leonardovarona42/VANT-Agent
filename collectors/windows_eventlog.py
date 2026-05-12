@@ -32,6 +32,7 @@ class WindowsEventLogCollector(CollectorBase):
                 "source_type": self.source_type,
                 "source_name": channel,
                 "host_name": self.agent_cfg.get("host_name", ""),
+                "host_ip": self._host_ip,
                 "event_time": now,
                 "severity": "info",
                 "event_category": f"windows.eventlog.{channel.lower().replace(' ', '_')}",

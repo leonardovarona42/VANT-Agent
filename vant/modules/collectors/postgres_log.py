@@ -46,6 +46,7 @@ class PostgresLogCollector(CollectorBase):
                     "source_type": self.source_type,
                     "source_name": "postgresql",
                     "host_name": self.agent_cfg.get("host_name", ""),
+                    "host_ip": self._host_ip,
                     "event_time": datetime.now(timezone.utc).isoformat(),
                     "severity": "info",
                     "event_category": "db.postgres.log",

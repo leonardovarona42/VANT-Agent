@@ -68,6 +68,7 @@ class SnortCollector(CollectorBase):
                     "source_type": self.source_type,
                     "source_name": "snort",
                     "host_name": self.agent_cfg.get("host_name", ""),
+                    "host_ip": self._host_ip,
                     "event_time": datetime.now(timezone.utc).isoformat(),
                     "severity": "medium",
                     "event_category": "ids.alert",

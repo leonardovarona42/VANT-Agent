@@ -39,13 +39,15 @@ class SystemMonitorCollector(CollectorBase):
         return self._collect_linux(max_procs, sort_by)
 
     def _collect_windows(self, max_procs):
+        ps_cmd = (
+            "Get-Process | Sort-Object CPU -Descending | "
+            "Select-Object -First {} Id, ProcessName, ".format(max_procs) +
+            "@{N='cpu_percent';E={[math]::Round($_.CPU,1)}}, "
+            "@{N='memory_mb';E={[math]::Round($_.WorkingSet64/1MB,1)}} | "
+            "ConvertTo-Json -Compress"
+        )
         result = _run_hidden([
-            "powershell", "-NoProfile", "-Command",
-            f"Get-Process | Sort-Object CPU -Descending | "
-            f"Select-Object -First {max_procs} Id, ProcessName, "
-            f"@{{{N='cpu_percent';E={{[math]::Round($_.CPU,1)}}}}, "
-            f"@{{{N='memory_mb';E={{[math]::Round($_.WorkingSet64/1MB,1)}}}} | "
-            f"ConvertTo-Json -Compress",
+            "powershell", "-NoProfile", "-Command", ps_cmd,
         ], timeout=20)
         if not result or result.returncode != 0:
             return []

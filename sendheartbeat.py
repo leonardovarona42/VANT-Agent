@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,37 +16,52 @@ def load_cfg(path):
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
 
 
-def detect_host():
-    hostname = socket.gethostname()
-    ip = ""
+def _get_local_ips():
+    ips = set()
     try:
-        ip = socket.gethostbyname(hostname)
+        ips.add(socket.gethostbyname(socket.gethostname()))
     except Exception:
-        ip = ""
-    if not ip or ip.startswith("127."):
+        pass
+    try:
+        if sys.platform.startswith("win"):
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*'}).IPAddress"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for line in out.stdout.strip().splitlines():
+                ip = line.strip()
+                if ip and not ip.startswith("127."):
+                    ips.add(ip)
+        else:
+            out = subprocess.run(
+                ["ip", "-4", "addr", "show"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for line in out.stdout.splitlines():
+                if "inet " in line:
+                    ip = line.strip().split()[1].split("/")[0]
+                    if ip and not ip.startswith("127."):
+                        ips.add(ip)
+    except Exception:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.connect(("8.8.8.8", 80))
-                ip = sock.getsockname()[0]
+                ips.add(sock.getsockname()[0])
         except Exception:
-            ip = ""
+            pass
+    return [ip for ip in ips if ip and not ip.startswith("127.")]
+
+
+def detect_host():
+    hostname = socket.gethostname()
+    ips = _get_local_ips()
+    ip = ips[0] if ips else ""
     return hostname, ip
 
 
 def current_ips():
-    ips = set()
-    try:
-        hostname = socket.gethostname()
-        ips.add(socket.gethostbyname(hostname))
-    except Exception:
-        pass
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            ips.add(sock.getsockname()[0])
-    except Exception:
-        pass
-    return [ip for ip in ips if ip and not ip.startswith("127.")]
+    return _get_local_ips()
 
 
 def default_config_path():

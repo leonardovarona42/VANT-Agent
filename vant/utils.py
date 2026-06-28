@@ -33,38 +33,67 @@ def check_output_hidden(*args, **kwargs):
     return subprocess.check_output(*args, **kwargs)
 
 
-def detect_host():
-    hostname = socket.gethostname()
-    ip = ""
+def _get_local_ips():
+    """Obtiene IPs locales sin depender de internet."""
+    ips = set()
     try:
-        ip = socket.gethostbyname(hostname)
+        hostname = socket.gethostname()
+        ips.add(socket.gethostbyname(hostname))
     except Exception:
         pass
-    if ip.startswith("127.") or not ip:
+    try:
+        import netifaces
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            if socket.AF_INET in addrs:
+                for addr in addrs[socket.AF_INET]:
+                    ip = addr.get('addr', '')
+                    if ip and not ip.startswith("127."):
+                        ips.add(ip)
+    except ImportError:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(3)
                 s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
+                ips.add(s.getsockname()[0])
         except Exception:
             pass
+        try:
+            import subprocess, sys
+            if sys.platform.startswith("win"):
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*'}).IPAddress"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                for line in out.stdout.strip().splitlines():
+                    ip = line.strip()
+                    if ip and not ip.startswith("127."):
+                        ips.add(ip)
+            else:
+                out = subprocess.run(
+                    ["ip", "-4", "addr", "show"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                for line in out.stdout.splitlines():
+                    if "inet " in line:
+                        ip = line.strip().split()[1].split("/")[0]
+                        if ip and not ip.startswith("127."):
+                            ips.add(ip)
+        except Exception:
+            pass
+    return [ip for ip in ips if ip and not ip.startswith("127.")]
+
+
+def detect_host():
+    hostname = socket.gethostname()
+    ips = _get_local_ips()
+    ip = ips[0] if ips else ""
     return hostname, ip
 
 
 def get_current_ips():
-    ips = set()
-    try:
-        ips.add(socket.gethostbyname(socket.gethostname()))
-    except Exception:
-        pass
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(3)
-            s.connect(("8.8.8.8", 80))
-            ips.add(s.getsockname()[0])
-    except Exception:
-        pass
-    return [ip for ip in ips if ip and not ip.startswith("127.")]
+    return _get_local_ips()
 
 
 def configure_logging(cfg, config_path):
@@ -179,8 +208,15 @@ def get_mac_address():
             pass
     else:
         try:
-            with open("/sys/class/net/$(ls /sys/class/net | grep -v lo | head -1)/address") as f:
-                return f.read().strip().upper()
+            for iface in os.listdir("/sys/class/net"):
+                if iface == "lo":
+                    continue
+                addr_file = f"/sys/class/net/{iface}/address"
+                if os.path.isfile(addr_file):
+                    with open(addr_file) as f:
+                        mac = f.read().strip().upper()
+                        if mac and ":" in mac:
+                            return mac
         except Exception:
             pass
     return ""

@@ -11,13 +11,17 @@ import platform
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from collections import defaultdict
 
 import yaml
 import requests
 
 from collectors.snort import SnortCollector
 from collectors.suricata import SuricataCollector
-from collectors.windows_eventlog import WindowsEventLogCollector
+try:
+    from collectors.windows_eventlog import WindowsEventLogCollector
+except ImportError:
+    WindowsEventLogCollector = None
 from collectors.postgres_log import PostgresLogCollector
 from collectors.file_log import FileLogCollector
 from output import OutputClient
@@ -43,7 +47,7 @@ def build_collectors(cfg):
         collectors.append(SnortCollector(collectors_cfg.get("snort"), agent_cfg))
     if collectors_cfg.get("suricata", {}).get("enabled"):
         collectors.append(SuricataCollector(collectors_cfg.get("suricata"), agent_cfg))
-    if collectors_cfg.get("windows_eventlog", {}).get("enabled"):
+    if WindowsEventLogCollector is not None and collectors_cfg.get("windows_eventlog", {}).get("enabled"):
         winlog_cfg = collectors_cfg.get("windows_eventlog") or {}
         channels = winlog_cfg.get("channels") or []
         if isinstance(channels, str):
@@ -89,7 +93,7 @@ def _apply_push_config(config_path, payload, logger, control_server, control_tok
 
         if cmd_id:
             _control_post(
-                f"{control_server}/api/agent/commands/ack/",
+                f"{control_server}/inventory/api/agent/commands/ack/",
                 {"command_id": cmd_id, "status": "done"},
                 control_token,
                 timeout=8,
@@ -105,7 +109,7 @@ def _apply_push_config(config_path, payload, logger, control_server, control_tok
         if cmd_id:
             try:
                 _control_post(
-                    f"{control_server}/api/agent/commands/ack/",
+                    f"{control_server}/inventory/api/agent/commands/ack/",
                     {"command_id": cmd_id, "status": "error: " + str(exc)},
                     control_token,
                     timeout=8,
@@ -114,21 +118,49 @@ def _apply_push_config(config_path, payload, logger, control_server, control_tok
                 pass
 
 
-def _detect_host():
-    hostname = socket.gethostname()
-    ip = ""
+def _get_local_ips():
+    ips = set()
     try:
-        ip = socket.gethostbyname(hostname)
+        ips.add(socket.gethostbyname(socket.gethostname()))
     except Exception:
-        ip = ""
-    if ip.startswith("127.") or not ip:
+        pass
+    try:
+        import subprocess
+        if sys.platform.startswith("win"):
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*'}).IPAddress"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for line in out.stdout.strip().splitlines():
+                ip = line.strip()
+                if ip and not ip.startswith("127."):
+                    ips.add(ip)
+        else:
+            out = subprocess.run(
+                ["ip", "-4", "addr", "show"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for line in out.stdout.splitlines():
+                if "inet " in line:
+                    ip = line.strip().split()[1].split("/")[0]
+                    if ip and not ip.startswith("127."):
+                        ips.add(ip)
+    except Exception:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(3)
                 s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
+                ips.add(s.getsockname()[0])
         except Exception:
-            ip = ""
+            pass
+    return [ip for ip in ips if ip and not ip.startswith("127.")]
+
+
+def _detect_host():
+    hostname = socket.gethostname()
+    ips = _get_local_ips()
+    ip = ips[0] if ips else ""
     return hostname, ip
 
 
@@ -204,7 +236,57 @@ def _control_headers(token):
 
 def _control_post(url, payload, token, timeout=8):
     headers = _control_headers(token)
-    return requests.post(url, json=payload, headers=headers, timeout=timeout)
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    resp = requests.post(url, json=payload, headers=headers, timeout=timeout, verify=False)
+    if not resp.ok:
+        logging.getLogger("vant-siem-agent").warning(
+            "control_post HTTP %s %s body=%s", resp.status_code, url, resp.text[:500]
+        )
+    return resp
+
+
+def _extract_server_hardware(inv):
+    hw_list = inv.get("hardware", [])
+    result = {
+        "cpu_model": "", "cpu_cores": 0, "cpu_threads": 0, "cpu_speed_ghz": 0,
+        "ram_total_gb": 0, "ram_slots_used": 0, "ram_slots_total": 0,
+        "motherboard_model": "", "motherboard_manufacturer": "",
+        "bios_version": "", "gpu_models": [], "disks": [],
+        "network_interfaces": [], "serial_number": "",
+        "manufacturer": "", "product_name": "",
+    }
+    for item in hw_list:
+        ct = item.get("component_type", "")
+        if ct == "bios":
+            result["bios_version"] = item.get("model", "")
+            if not result["serial_number"]:
+                result["serial_number"] = item.get("serial_number", "")
+        elif ct == "system":
+            result["manufacturer"] = item.get("vendor", "")
+            result["product_name"] = item.get("name", "")
+            if not result["serial_number"]:
+                result["serial_number"] = item.get("serial_number", "")
+        elif ct == "cpu":
+            result["cpu_model"] = item.get("name", "")
+        elif ct == "board":
+            result["motherboard_model"] = item.get("model", "")
+            result["motherboard_manufacturer"] = item.get("vendor", "")
+        elif ct == "disk":
+            meta = item.get("metadata", {})
+            result["disks"].append({
+                "model": item.get("model", ""),
+                "size": meta.get("size", ""),
+                "interface": meta.get("interface", ""),
+                "serial": item.get("serial_number", ""),
+            })
+        elif ct == "network":
+            result["network_interfaces"].append({
+                "name": item.get("name", ""),
+                "mac": item.get("serial_number", ""),
+                "model": item.get("model", ""),
+            })
+    return result
 
 
 def _spawn_detached_process(args):
@@ -245,20 +327,128 @@ def _restart_self(config_path, logger=None):
 
 
 def _current_ips():
-    ips = set()
+    return _get_local_ips()
+
+
+def _run_powershell(cmd_args, timeout=15):
+    if not sys.platform.startswith("win"):
+        return None
     try:
-        hostname = socket.gethostname()
-        ips.add(socket.gethostbyname(hostname))
-    except Exception:
-        pass
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-Command"] + cmd_args,
+            capture_output=True, text=True, timeout=timeout, check=False,
+            startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _collect_processes_windows():
+    ps_script = """
+    $ps = Get-Process | Where-Object { $_.Id -gt 0 } | Select-Object Id, ProcessName,
+        @{N='cpu_percent';E={[math]::Round((Get-Process -Id $_.Id).CPU, 1)}},
+        @{N='memory_mb';E={[math]::Round($_.WorkingSet64 / 1MB, 1)}},
+        @{N='session_id';E={$_.SessionId}}
+    $tcp = Get-NetTCPConnection -ErrorAction SilentlyContinue | Select-Object LocalPort, RemotePort, RemoteAddress, OwningProcess, State,
+        @{N='protocol';E={'tcp'}}
+    $udp = Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Select-Object LocalPort, @{N='RemotePort';E={''}}, @{N='RemoteAddress';E={''}}, OwningProcess,
+        @{N='State';E={'Listen'}},
+        @{N='protocol';E={'udp'}}
+    $conns = $tcp + $udp
+    $result = @{ processes=($ps | ConvertTo-Json -Depth 3); connections=($conns | ConvertTo-Json -Depth 3) }
+    Write-Output ($result | ConvertTo-Json -Compress)
+    """
+    result = _run_powershell([ps_script], timeout=20)
+    if result is None or result.returncode != 0 or not result.stdout.strip():
+        return [], []
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(3)
-            s.connect(("8.8.8.8", 80))
-            ips.add(s.getsockname()[0])
+        data = json.loads(result.stdout.strip())
+        processes = json.loads(data.get("processes", "[]")) if isinstance(data.get("processes"), str) else data.get("processes", [])
+        connections = json.loads(data.get("connections", "[]")) if isinstance(data.get("connections"), str) else data.get("connections", [])
+        normalized_procs = []
+        for p in processes:
+            normalized_procs.append({
+                "pid": p.get("Id", 0),
+                "name": p.get("ProcessName", "Unknown"),
+                "process_name": p.get("ProcessName", "Unknown"),
+                "cpu_percent": p.get("cpu_percent", 0),
+                "memory_mb": p.get("memory_mb", 0),
+                "session_id": p.get("session_id", 0),
+            })
+        normalized_conns = []
+        for c in connections:
+            normalized_conns.append({
+                "local_port": c.get("LocalPort", ""),
+                "remote_port": c.get("RemotePort", ""),
+                "remote_address": c.get("RemoteAddress", ""),
+                "owning_pid": c.get("OwningProcess", 0),
+                "state": c.get("State", ""),
+                "protocol": c.get("protocol", "tcp"),
+            })
+        return normalized_procs, normalized_conns
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        logging.getLogger("vant-siem-agent").warning("collect_processes parse error=%s", exc)
+        return [], []
+
+
+def _collect_processes_linux():
+    try:
+        procs = []
+        result = subprocess.run(
+            ["ps", "aux", "--sort=-%cpu"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split("\n")
+            for line in lines[1:]:
+                parts = line.split(None, 10)
+                if len(parts) < 11:
+                    continue
+                try:
+                    procs.append({
+                        "pid": int(parts[1]),
+                        "name": parts[10][:100],
+                        "process_name": parts[10][:100],
+                        "cpu_percent": float(parts[2]),
+                        "memory_mb": round(float(parts[3]) * 1024 / 1024, 1),
+                        "session_id": parts[5] if len(parts) > 5 else "",
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+        conns = []
+        result2 = subprocess.run(
+            ["ss", "-tan"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if result2.returncode == 0:
+            for line in result2.stdout.strip().split("\n")[1:]:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local = parts[3]
+                peer = parts[4]
+                local_port = local.rsplit(":", 1)[-1] if ":" in local else ""
+                remote = peer.rsplit(":", 1)
+                conns.append({
+                    "local_port": local_port,
+                    "remote_port": remote[-1] if len(remote) > 1 else "",
+                    "remote_address": remote[0] if len(remote) > 1 else peer,
+                    "owning_pid": 0,
+                    "state": parts[0],
+                    "protocol": "tcp",
+                })
+        return procs, conns
     except Exception:
-        pass
-    return [ip for ip in ips if ip and not ip.startswith("127.")]
+        return [], []
+
+
+def _collect_processes():
+    if sys.platform.startswith("win"):
+        return _collect_processes_windows()
+    return _collect_processes_linux()
 
 
 def run_with_stop(config_path, stop_event):
@@ -286,6 +476,7 @@ def run_with_stop(config_path, stop_event):
     control_cfg = _control_config(cfg)
     control_server = (control_cfg.get("server_url") or "").rstrip("/")
     control_poll = int(control_cfg.get("poll_seconds", 30))
+    logger.info("debug control_server=%s control_poll=%s", control_server, control_poll)
     control_token = (
         cfg.get("output", {}).get("auth", {}).get("token")
         or control_cfg.get("token", "")
@@ -369,7 +560,9 @@ def run_with_stop(config_path, stop_event):
                 # Keep agent running even if output endpoint is down.
                 logger.error("send_events failed error=%s batch=%s", exc, len(batch))
             now = time.time()
+            logger.info("debug now=%s next_control=%s next_inventory=%s", now, next_control, next_inventory)
             if control_server and now >= next_control:
+                logger.info("debug control_poll entering")
                 try:
                     payload = {
                         "agent_id": agent_cfg.get("id", "agent"),
@@ -379,13 +572,13 @@ def run_with_stop(config_path, stop_event):
                         "ips": _current_ips(),
                     }
                     _control_post(
-                        f"{control_server}/api/agent/heartbeat/",
+                        f"{control_server}/inventory/api/heartbeat/",
                         payload,
                         control_token,
                         timeout=8,
                     )
                     cmd_resp = _control_post(
-                        f"{control_server}/api/agent/commands/pull/",
+                        f"{control_server}/inventory/api/agent/commands/pull/",
                         {"agent_id": agent_cfg.get("id", "agent")},
                         control_token,
                         timeout=8,
@@ -407,7 +600,7 @@ def run_with_stop(config_path, stop_event):
                                 if _restart_self(config_path, logger):
                                     if cmd_id:
                                         _control_post(
-                                            f"{control_server}/api/agent/commands/ack/",
+                                            f"{control_server}/inventory/api/agent/commands/ack/",
                                             {"command_id": cmd_id, "status": "done"},
                                             control_token,
                                             timeout=8,
@@ -422,7 +615,31 @@ def run_with_stop(config_path, stop_event):
                                 logger.info("command.activate received")
                                 if cmd_id:
                                     _control_post(
-                                        f"{control_server}/api/agent/commands/ack/",
+                                        f"{control_server}/inventory/api/agent/commands/ack/",
+                                        {"command_id": cmd_id, "status": "done"},
+                                        control_token,
+                                        timeout=8,
+                                    )
+                            elif cmd_type == "collect_processes":
+                                logger.info("command.collect_processes received")
+                                try:
+                                    procs, conns = _collect_processes()
+                                    _control_post(
+                                        f"{control_server}/inventory/api/agent/processes/upload/",
+                                        {
+                                            "agent_id": agent_cfg.get("id", "agent"),
+                                            "processes": procs,
+                                            "connections": conns,
+                                        },
+                                        control_token,
+                                        timeout=30,
+                                    )
+                                    logger.info("collect_processes uploaded procs=%d conns=%d", len(procs), len(conns))
+                                except Exception as exc:
+                                    logger.exception("collect_processes failed error=%s", exc)
+                                if cmd_id:
+                                    _control_post(
+                                        f"{control_server}/inventory/api/agent/commands/ack/",
                                         {"command_id": cmd_id, "status": "done"},
                                         control_token,
                                         timeout=8,
@@ -432,14 +649,22 @@ def run_with_stop(config_path, stop_event):
                     logger.warning("control poll failed error=%s", exc)
 
             if control_server and inventory_service and now >= next_inventory:
+                logger.info("debug inventory entering")
                 try:
                     inv = inventory_service.collect()
+                    hw = _extract_server_hardware(inv)
+                    sw = inv.get("software", [])
                     _control_post(
-                        f"{control_server}/api/agent/inventory/",
-                        {"agent_id": agent_cfg.get("id", "agent"), "inventory": inv},
+                        f"{control_server}/inventory/api/inventory/submit/",
+                        {
+                            "agent_id": agent_cfg.get("id", "agent"),
+                            "hardware": hw,
+                            "software": sw,
+                        },
                         control_token,
                         timeout=30,
                     )
+                    logger.info("inventory uploaded hw=%s sw=%d", inv.get("os", ""), len(sw))
                 except Exception as exc:
                     logger.warning("inventory upload failed error=%s", exc)
                 next_inventory = now + inventory_seconds
@@ -464,7 +689,7 @@ def run_with_stop(config_path, stop_event):
                         pending = dlp_service.peek_pending_incidents()
                         if pending:
                             _control_post(
-                                f"{control_server}/api/agent/dlp/incidents/",
+                                f"{control_server}/inventory/api/agent/dlp/incidents/",
                                 {"agent_id": agent_cfg.get("id", "agent"), "incidents": pending},
                                 control_token,
                                 timeout=30,

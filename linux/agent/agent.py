@@ -21,6 +21,9 @@ from collectors.snort import SnortCollector
 from collectors.suricata import SuricataCollector
 from collectors.postgres_log import PostgresLogCollector
 from collectors.file_log import FileLogCollector
+from collectors.system_monitor import SystemMonitorCollector
+from collectors.service_monitor import ServiceMonitorCollector
+from collectors.firewall_monitor import FirewallMonitorCollector
 from output import OutputClient
 from services.audit_inventory import AuditInventoryService
 from services.aegis_dlp import AegisDlpService
@@ -50,6 +53,15 @@ def build_collectors(cfg, host_ip=""):
         collectors.append(PostgresLogCollector(collectors_cfg.get("postgres"), agent_cfg))
     if collectors_cfg.get("file_logs", {}).get("enabled"):
         collectors.append(FileLogCollector(collectors_cfg.get("file_logs"), agent_cfg))
+    if cfg.get("monitoring", {}).get("enabled") or cfg.get("monitoring", {}).get("processes", {}).get("enabled"):
+        mon = cfg.get("monitoring", {})
+        collectors.append(SystemMonitorCollector(mon, agent_cfg))
+    if cfg.get("monitoring", {}).get("services", {}).get("enabled"):
+        mon = cfg.get("monitoring", {})
+        collectors.append(ServiceMonitorCollector(mon, agent_cfg))
+    if cfg.get("monitoring", {}).get("firewall", {}).get("enabled"):
+        mon = cfg.get("monitoring", {})
+        collectors.append(FirewallMonitorCollector(mon, agent_cfg))
 
     return collectors
 
@@ -122,9 +134,11 @@ def _detect_host():
     return hostname, ip
 
 
-def _ensure_host_fields(event, host_name, host_ip):
+def _ensure_host_fields(event, host_name, host_ip, agent_id=None):
     if not event.get("host_name"):
         event["host_name"] = host_name
+    if agent_id and not event.get("agent_id"):
+        event["agent_id"] = agent_id
     raw = event.get("raw_payload")
     if raw is None or not isinstance(raw, dict):
         raw = {}
@@ -373,53 +387,53 @@ def run_with_stop(config_path, stop_event):
                 control_token,
                 timeout=8,
             )
-        if resp and resp.status_code == 200:
-            data = resp.json()
-            cmd_resp = _control_post(
-                f"{control_server}/inventory/api/agent/commands/pull/",
-                {"agent_id": agent_id},
-                control_token,
-                timeout=8,
-            )
-            if cmd_resp and cmd_resp.status_code == 200:
-                cmd_data = cmd_resp.json()
-                commands = cmd_data.get("commands", [])
-                if commands:
-                    logger.info("startup.commands count=%s", len(commands))
-                for cmd_item in commands:
-                    cmd_type = cmd_item.get("command_type", "")
-                    cmd_id = cmd_item.get("command_id", "")
-                    cmd_payload = cmd_item.get("payload", {})
-                    if cmd_type == "stop":
-                        logger.warning("command.stop at startup")
-                        if screen_service:
-                            screen_service.stop()
-                        logger.info("agent.stopped")
-                        return "stop"
-                    elif cmd_type == "restart":
-                        logger.warning("command.restart at startup")
-                        if screen_service:
-                            screen_service.stop()
-                        logger.info("agent.stopped")
-                        return "restart"
-                    elif cmd_type == "push_config":
-                        logger.info("command.push_config at startup")
-                        _apply_push_config(config_path, cmd_payload, logger, control_server, control_token, cmd_id)
-                        cfg = load_cfg(config_path)
-                        agent_cfg = cfg.get("agent", {})
-                        collectors = build_collectors(cfg, host_ip)
-                        interval = int(agent_cfg.get("interval_seconds", 10))
-                    elif cmd_type == "activate":
-                        logger.info("command.activate at startup")
-                        if cmd_id:
-                            _control_post(
-                                f"{control_server}/inventory/api/command-result/",
-                                {"command_id": cmd_id, "status": "completed", "result": {}},
-                                control_token,
-                                timeout=8,
-                            )
-    except Exception as e:
-        logger.warning("startup.commands check error=%s", e)
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                cmd_resp = _control_post(
+                    f"{control_server}/inventory/api/agent/commands/pull/",
+                    {"agent_id": agent_id},
+                    control_token,
+                    timeout=8,
+                )
+                if cmd_resp and cmd_resp.status_code == 200:
+                    cmd_data = cmd_resp.json()
+                    commands = cmd_data.get("commands", [])
+                    if commands:
+                        logger.info("startup.commands count=%s", len(commands))
+                    for cmd_item in commands:
+                        cmd_type = cmd_item.get("command_type", "")
+                        cmd_id = cmd_item.get("command_id", "")
+                        cmd_payload = cmd_item.get("payload", {})
+                        if cmd_type == "stop":
+                            logger.warning("command.stop at startup")
+                            if screen_service:
+                                screen_service.stop()
+                            logger.info("agent.stopped")
+                            return "stop"
+                        elif cmd_type == "restart":
+                            logger.warning("command.restart at startup")
+                            if screen_service:
+                                screen_service.stop()
+                            logger.info("agent.stopped")
+                            return "restart"
+                        elif cmd_type == "push_config":
+                            logger.info("command.push_config at startup")
+                            _apply_push_config(config_path, cmd_payload, logger, control_server, control_token, cmd_id)
+                            cfg = load_cfg(config_path)
+                            agent_cfg = cfg.get("agent", {})
+                            collectors = build_collectors(cfg, host_ip)
+                            interval = int(agent_cfg.get("interval_seconds", 10))
+                        elif cmd_type == "activate":
+                            logger.info("command.activate at startup")
+                            if cmd_id:
+                                _control_post(
+                                    f"{control_server}/inventory/api/command-result/",
+                                    {"command_id": cmd_id, "status": "completed", "result": {}},
+                                    control_token,
+                                    timeout=8,
+                                )
+        except Exception as e:
+            logger.warning("startup.commands check error=%s", e)
 
     while not stop_event.is_set():
         try:
@@ -429,7 +443,7 @@ def run_with_stop(config_path, stop_event):
                 try:
                     events = collector.collect()
                     for ev in events:
-                        _ensure_host_fields(ev, agent_cfg.get("host_name", ""), agent_cfg.get("host_ip", ""))
+                        _ensure_host_fields(ev, agent_cfg.get("host_name", ""), agent_cfg.get("host_ip", ""), agent_cfg.get("id", ""))
                     batch.extend(events)
                 except Exception as exc:
                     logger.exception("collector failed source=%s", collector.source_type)
@@ -448,6 +462,7 @@ def run_with_stop(config_path, stop_event):
                             },
                             agent_cfg.get("host_name", ""),
                             agent_cfg.get("host_ip", ""),
+                            agent_cfg.get("id", ""),
                         )
                     )
             try:

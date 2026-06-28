@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 
 from collectors.base import CollectorBase
+
+logger = logging.getLogger("vant-siem-agent")
 
 
 class FileLogCollector(CollectorBase):
@@ -144,6 +147,7 @@ class FileLogCollector(CollectorBase):
         now = datetime.now(timezone.utc).isoformat()
         source_name = item.get("source_name") or path.name
         category = item.get("event_category", "file.log")
+        logger.info("file_log.collect path=%s event_category=%s", str(path), category)
         severity = item.get("severity", "info")
         tags = item.get("tags", ["file", "log"])
 
@@ -237,6 +241,7 @@ class FileLogCollector(CollectorBase):
                     "tags": tags,
                 }
             )
+        logger.info("file_log.returning path=%s events=%d", str(path), len(events))
         return events
 
     def collect(self):
@@ -246,10 +251,12 @@ class FileLogCollector(CollectorBase):
         if not isinstance(items, list):
             return []
         events = []
+        logger.info("file_log.collect_start items=%d", len(items))
         for item in items:
             if not isinstance(item, dict):
                 continue
             if not item.get("enabled", True):
                 continue
             events.extend(self._collect_from_path(item))
+        logger.info("file_log.collect_done total_events=%d", len(events))
         return events

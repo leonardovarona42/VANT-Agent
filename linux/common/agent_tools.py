@@ -216,7 +216,7 @@ def send_heartbeat(config_path=None):
         "source": "manual-heartbeat",
     }
     response = requests.post(
-        f"{server_url}/api/agent/heartbeat/",
+        f"{server_url}/inventory/api/heartbeat/",
         json=payload,
         headers=_auth_headers(config),
         timeout=8,
@@ -324,7 +324,7 @@ def check_agent(config_path=None):
     if server_url:
         try:
             response = requests.get(
-                f"{server_url}/api/agent/bootstrap/",
+                f"{server_url}/inventory/api/agent/bootstrap/",
                 headers={"X-Agent-Id": agent.get("id", "")},
                 timeout=8,
             )

@@ -17,6 +17,17 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 BOOTSTRAP_KEY_PATH = BASE_DIR / "common" / "bootstrap.key"
 DEFAULT_AGENT_SHARED_SECRET = "VANT-SIEM-AGENT-BOOTSTRAP-2026"
 
+_SESSION = None
+def _http_session():
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = requests.Session()
+        _SESSION.verify = False
+        _SESSION.timeout = 10
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    return _SESSION
+
 
 def _read_yaml(path):
     if not path or not path.exists():
@@ -32,9 +43,24 @@ def _write_yaml(path, data):
     )
 
 
+def _tty_input(prompt):
+    """Read input from the controlling terminal (/dev/tty) if available."""
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        with open("/dev/tty", "r") as tty:
+            return tty.readline().strip()
+    except (IOError, OSError):
+        return input().strip()
+
+
 def _prompt(text, default=None):
     hint = f" [{default}]" if default is not None and default != "" else ""
-    value = input(f"{text}{hint}: ").strip()
+    prompt = f"{text}{hint}: "
+    if sys.stdin.isatty():
+        value = input(prompt).strip()
+    else:
+        value = _tty_input(prompt)
     return value if value else (default if default is not None else "")
 
 
@@ -57,7 +83,11 @@ def _prompt_int(text, default, min_value=None, max_value=None):
 
 def _prompt_bool(text, default=False):
     suffix = "S/n" if default else "s/N"
-    value = input(f"{text} [{suffix}]: ").strip().lower()
+    prompt = f"{text} [{suffix}]: "
+    if sys.stdin.isatty():
+        value = input(prompt).strip().lower()
+    else:
+        value = _tty_input(prompt).lower()
     if not value:
         return default
     return value in ("s", "si", "y", "yes")
@@ -74,12 +104,12 @@ def _prompt_choice(text, options, default):
 
 def _build_enroll_url(host, port, https_enabled):
     scheme = "https" if https_enabled else "http"
-    return f"{scheme}://{host}:{port}/api/agent/enroll/"
+    return f"{scheme}://{host}:{port}/inventory/api/agent/enroll/"
 
 
 def _build_bootstrap_url(host, port, https_enabled):
     scheme = "https" if https_enabled else "http"
-    return f"{scheme}://{host}:{port}/api/agent/bootstrap/"
+    return f"{scheme}://{host}:{port}/inventory/api/agent/bootstrap/"
 
 
 def _load_bootstrap_key():
@@ -101,7 +131,7 @@ def _fetch_bootstrap_secret(host, port, https_enabled, agent_id):
     url = _build_bootstrap_url(host, port, https_enabled)
     try:
         headers = {"X-Agent-Id": agent_id}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = _http_session().get(url, headers=headers, timeout=6)
         if "application/json" not in response.headers.get("Content-Type", ""):
             return ""
         data = response.json()
@@ -125,12 +155,7 @@ def _owner_account():
 
 def _probe_endpoint(endpoint):
     try:
-        parsed = urlparse(endpoint)
-        if not parsed.hostname or not parsed.port:
-            return False
-        sock = socket.create_connection((parsed.hostname, parsed.port), timeout=3)
-        sock.close()
-        return True
+        return _http_session().get(endpoint, timeout=5).ok
     except Exception:
         return False
 
@@ -138,7 +163,7 @@ def _probe_endpoint(endpoint):
 def _probe_control_server(host, port, https_enabled, agent_id):
     url = _build_bootstrap_url(host, port, https_enabled)
     try:
-        response = requests.get(url, headers={"X-Agent-Id": agent_id}, timeout=6)
+        response = _http_session().get(url, headers={"X-Agent-Id": agent_id}, timeout=6)
         return True, response.status_code
     except Exception as exc:
         return False, str(exc)
@@ -153,7 +178,7 @@ def _ensure_dict(root, *keys):
 
 def _apply_agent_identity(cfg):
     agent_cfg = _ensure_dict(cfg, "agent")
-    agent_cfg["id"] = _prompt("Agent ID", agent_cfg.get("id", "agent-001"))
+    agent_cfg["id"] = _prompt("Agent ID", agent_cfg.get("id", socket.gethostname()))
     agent_cfg["host_name"] = _prompt("Host name", agent_cfg.get("host_name", socket.gethostname()))
     agent_cfg["interval_seconds"] = _prompt_int(
         "Intervalo (segundos)",
@@ -213,8 +238,12 @@ def _apply_connection(cfg):
     _ensure_dict(cfg, "aegis_dlp")
     _ensure_dict(cfg, "asset_audit")
 
+    parsed = urlparse(server_url)
     return {
         "server_url": server_url,
+        "server_host": parsed.hostname or "",
+        "server_port": str(parsed.port or (443 if is_https else 80)),
+        "server_https": is_https,
     }
 
 
@@ -244,11 +273,12 @@ def _apply_auth(cfg, connection_info, agent_id, host_name):
     if not should_test:
         return False
 
+    srv_host = connection_info.get("server_host") or urlparse(connection_info.get("server_url", "")).hostname or "127.0.0.1"
+    srv_port = connection_info.get("server_port") or str(urlparse(connection_info.get("server_url", "")).port or "80")
+    srv_https = connection_info.get("server_https", False)
+
     control_ok, control_info = _probe_control_server(
-        connection_info["server_host"],
-        connection_info["server_port"],
-        connection_info["server_https"],
-        agent_id,
+        srv_host, srv_port, srv_https, agent_id,
     )
     if control_ok:
         print(f"  Control server responde. Bootstrap status: {control_info}")
@@ -259,10 +289,7 @@ def _apply_auth(cfg, connection_info, agent_id, host_name):
         shared_secret = bootstrap_key.strip() or _load_bootstrap_key()
         if not shared_secret:
             shared_secret = _fetch_bootstrap_secret(
-                connection_info["server_host"],
-                connection_info["server_port"],
-                connection_info["server_https"],
-                agent_id,
+                srv_host, srv_port, srv_https, agent_id,
             )
         if not shared_secret:
             shared_secret = DEFAULT_AGENT_SHARED_SECRET
@@ -284,7 +311,7 @@ def _apply_auth(cfg, connection_info, agent_id, host_name):
             connection_info["server_https"],
         )
         try:
-            response = requests.post(enroll_url, json=payload, timeout=8)
+            response = _http_session().post(enroll_url, json=payload, timeout=8)
             data = {}
             if "application/json" in response.headers.get("Content-Type", ""):
                 data = response.json()
@@ -314,21 +341,11 @@ def _apply_auth(cfg, connection_info, agent_id, host_name):
 def _apply_collectors(cfg):
     collectors = _ensure_dict(cfg, "collectors")
 
-    snort_cfg = _ensure_dict(collectors, "snort")
-    snort_cfg["enabled"] = _prompt_bool("Habilitar Snort", snort_cfg.get("enabled", False))
-    snort_cfg["path"] = _prompt("Ruta Snort", snort_cfg.get("path", "/var/log/snort/alert"))
-    snort_cfg["start_position"] = snort_cfg.get("start_position", "end")
-    snort_cfg["max_lines_per_cycle"] = int(snort_cfg.get("max_lines_per_cycle", 400))
-
     suricata_cfg = _ensure_dict(collectors, "suricata")
     suricata_cfg["enabled"] = _prompt_bool("Habilitar Suricata", suricata_cfg.get("enabled", False))
     suricata_cfg["path"] = _prompt("Ruta Suricata", suricata_cfg.get("path", "/var/log/suricata/eve.json"))
     suricata_cfg["start_position"] = suricata_cfg.get("start_position", "end")
     suricata_cfg["max_lines_per_cycle"] = int(suricata_cfg.get("max_lines_per_cycle", 600))
-
-    winlog_cfg = _ensure_dict(collectors, "windows_eventlog")
-    winlog_cfg["enabled"] = _prompt_bool("Habilitar Windows Event Log", winlog_cfg.get("enabled", False))
-    winlog_cfg["channel"] = _prompt("Canal Windows Event Log", winlog_cfg.get("channel", "Security"))
 
     pg_cfg = _ensure_dict(collectors, "postgres")
     pg_cfg["enabled"] = _prompt_bool("Habilitar PostgreSQL", pg_cfg.get("enabled", False))

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from collectors.base import CollectorBase
+from vant.modules.collectors.base import CollectorBase
 
 
 _MAX_PROCESSED_IDS = 10000

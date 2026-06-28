@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from collectors.base import CollectorBase
+from vant.modules.collectors.base import CollectorBase
 
 
 class SuricataCollector(CollectorBase):

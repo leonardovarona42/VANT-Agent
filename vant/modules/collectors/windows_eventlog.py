@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timezone
 
 from vant.utils import run_hidden
-from collectors.base import CollectorBase
+from vant.modules.collectors.base import CollectorBase
 
 
 class WindowsEventLogCollector(CollectorBase):

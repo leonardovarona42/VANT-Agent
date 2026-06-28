@@ -148,6 +148,26 @@ def build_collectors(cfg, logger):
         except Exception as e:
             logger.warning("file_log collector failed to load: %s", e)
 
+    mon_cfg = cfg.get("monitoring", {})
+    if mon_cfg.get("enabled") or mon_cfg.get("processes", {}).get("enabled"):
+        try:
+            from vant.modules.collectors.system_monitor import SystemMonitorCollector
+            collectors.append(SystemMonitorCollector(mon_cfg, agent_cfg))
+        except Exception as e:
+            logger.warning("system_monitor collector failed: %s", e)
+    if mon_cfg.get("services", {}).get("enabled"):
+        try:
+            from vant.modules.collectors.service_monitor import ServiceMonitorCollector
+            collectors.append(ServiceMonitorCollector(mon_cfg, agent_cfg))
+        except Exception as e:
+            logger.warning("service_monitor collector failed: %s", e)
+    if mon_cfg.get("firewall", {}).get("enabled"):
+        try:
+            from vant.modules.collectors.firewall_monitor import FirewallMonitorCollector
+            collectors.append(FirewallMonitorCollector(mon_cfg, agent_cfg))
+        except Exception as e:
+            logger.warning("firewall_monitor collector failed: %s", e)
+
     return collectors
 
 

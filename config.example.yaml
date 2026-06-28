@@ -71,6 +71,18 @@ inventory:
   enabled: true
   interval: 300  # seconds between inventory submissions (default 5min)
 
+monitoring:
+  enabled: true
+  processes:
+    enabled: true
+    max_processes: 50
+    sort_by: cpu
+  services:
+    enabled: false
+    monitored_services: []
+  firewall:
+    enabled: false
+
 dlp:
   enabled: false
   scan_paths:

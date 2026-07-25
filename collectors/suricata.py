@@ -24,18 +24,19 @@ class SuricataCollector(CollectorBase):
         if not path.exists():
             return []
 
-        with path.open("rb") as fh:
-            fh_stat = fh.stat()
-            if fh_stat.st_size < self._offset:
-                self._offset = 0
-                self._initialized = False
+        st = path.stat()
+        if st.st_size < self._offset:
+            self._offset = 0
+            self._initialized = False
 
-            if not self._initialized:
-                self._initialized = True
-                if str(self.cfg.get("start_position", "end")).lower() == "end":
-                    fh.seek(0, 2)
-                    self._offset = fh.tell()
-                    return []
+        if not self._initialized:
+            self._initialized = True
+            if str(self.cfg.get("start_position", "end")).lower() == "end":
+                self._offset = st.st_size
+                return []
+
+        raw = b""
+        with path.open("rb") as fh:
             fh.seek(self._offset)
             raw = fh.read()
             self._offset = fh.tell()
@@ -64,7 +65,7 @@ class SuricataCollector(CollectorBase):
                     "source_type": self.source_type,
                     "source_name": "suricata",
                     "host_name": self.agent_cfg.get("host_name", ""),
-                    "host_ip": self._host_ip,
+                    "host_ip": "",
                     "event_time": ts,
                     "severity": str(payload.get("alert", {}).get("severity", "")),
                     "event_category": payload.get("event_type", "ids.event"),

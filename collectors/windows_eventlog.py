@@ -1,8 +1,28 @@
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 
-from vant.utils import run_hidden
 from collectors.base import CollectorBase
+
+
+def _run_powershell(cmd):
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return None
 
 
 class WindowsEventLogCollector(CollectorBase):
@@ -19,11 +39,8 @@ class WindowsEventLogCollector(CollectorBase):
             f"Get-WinEvent -LogName '{channel}' -MaxEvents 20 | "
             "Select-Object TimeCreated, Id, LevelDisplayName, Message | ConvertTo-Json -Depth 3",
         ]
-        try:
-            result = run_hidden(cmd, capture_output=True, text=True, timeout=8, check=False)
-            if result.returncode != 0 or not result.stdout.strip():
-                return []
-        except Exception:
+        result = _run_powershell(cmd)
+        if result is None or result.returncode != 0 or not result.stdout.strip():
             return []
 
         now = datetime.now(timezone.utc).isoformat()

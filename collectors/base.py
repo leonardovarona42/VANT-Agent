@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import socket
 
 
 class CollectorBase(ABC):
@@ -8,9 +9,15 @@ class CollectorBase(ABC):
         self._host_ip = self._resolve_ip()
 
     def _resolve_ip(self):
-        from vant.utils import detect_host
-        _, ip = detect_host()
-        return ip
+        try:
+            from vant.utils import detect_host
+            _, ip = detect_host()
+            return ip
+        except ImportError:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return "127.0.0.1"
 
     @property
     @abstractmethod
@@ -19,6 +26,5 @@ class CollectorBase(ABC):
 
     @abstractmethod
     def collect(self):
-        """Return list[dict] normalized events."""
         pass
 

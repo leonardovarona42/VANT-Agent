@@ -1,5 +1,4 @@
 """Monitor de servicios del sistema (systemd en Linux, Services en Windows)"""
-import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -24,8 +23,32 @@ def _run_hidden(cmd, timeout=15):
         return None
 
 
+def _parse_apt_updates():
+    packages = []
+    try:
+        result = subprocess.run(
+            ["apt", "list", "--upgradable"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n")[1:]:
+                if "/" in line:
+                    parts = line.split()
+                    pkg_name = parts[0].split("/")[0]
+                    available = parts[1] if len(parts) > 1 else ""
+                    packages.append({"package": pkg_name, "available": available})
+    except Exception:
+        pass
+    return packages
+
+
 class ServiceMonitorCollector(CollectorBase):
     source_type = "service_monitor"
+
+    def __init__(self, cfg, agent_cfg):
+        super().__init__(cfg, agent_cfg)
+        self._last_apt_check = 0
+        self._apt_updates_cache = []
 
     def collect(self):
         svc_cfg = self.cfg.get("services", {})
@@ -33,8 +56,36 @@ class ServiceMonitorCollector(CollectorBase):
             return []
         monitored = svc_cfg.get("monitored_services", [])
         if sys.platform.startswith("win"):
-            return self._collect_windows(monitored)
-        return self._collect_linux(monitored)
+            events = self._collect_windows(monitored)
+        else:
+            events = self._collect_linux(monitored)
+
+        if svc_cfg.get("check_apt_updates", True):
+            import time
+            interval = svc_cfg.get("apt_check_interval", 86400)
+            now = time.time()
+            if now - self._last_apt_check >= interval:
+                self._apt_updates_cache = _parse_apt_updates()
+                self._last_apt_check = now
+
+            if self._apt_updates_cache:
+                now_ts = datetime.now(timezone.utc).isoformat()
+                events.append({
+                    "source_type": self.source_type,
+                    "source_name": "apt.updates_available",
+                    "host_name": self.agent_cfg.get("host_name", ""),
+                    "event_time": now_ts,
+                    "severity": "warning",
+                    "event_category": "system.apt_updates",
+                    "message": f"{len(self._apt_updates_cache)} packages have updates available",
+                    "raw_payload": {
+                        "packages": self._apt_updates_cache,
+                        "count": len(self._apt_updates_cache),
+                    },
+                    "tags": ["system", "apt", "updates"],
+                })
+
+        return events
 
     def _collect_linux(self, monitored):
         if monitored:

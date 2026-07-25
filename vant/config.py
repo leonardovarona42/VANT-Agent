@@ -25,6 +25,8 @@ DEFAULTS = {
         "snort": {"enabled": False, "path": ""},
         "suricata": {"enabled": False, "path": ""},
         "windows_eventlog": {"enabled": False, "channels": ["Security", "System"]},
+        "syslog": {"enabled": False, "path": "/var/log/syslog"},
+        "journald": {"enabled": False},
         "postgres": {"enabled": False, "path": ""},
         "file_logs": {"enabled": False, "items": []},
     },
@@ -37,6 +39,15 @@ DEFAULTS = {
         "scan_paths": [],
         "scan_extensions": [".docx", ".xlsx", ".pdf", ".txt"],
         "keywords": ["clasificado", "secreto", "restringido"],
+    },
+    "monitoring": {
+        "enabled": False,
+        "services": {
+            "enabled": False,
+            "monitored_services": [],
+            "check_apt_updates": True,
+            "apt_check_interval": 86400,
+        },
     },
     "logging": {
         "level": "INFO",

@@ -1,7 +1,10 @@
 import json
 import logging
+import os
 import platform
+import re
 import socket
+import subprocess
 
 from vant.utils import run_hidden
 
@@ -198,4 +201,117 @@ def collect_windows_software():
             "size_mb": size_mb,
             "is_system": False,
         })
+    return sw_list
+
+
+def collect_linux_hardware():
+    hw = {}
+    try:
+        with open("/proc/cpuinfo") as f:
+            cpuinfo = f.read()
+        for line in cpuinfo.splitlines():
+            if line.startswith("model name"):
+                hw["cpu_model"] = line.split(":", 1)[-1].strip()
+                break
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    kb = int(line.split()[1])
+                    hw["ram_total_gb"] = round(kb / (1024 * 1024), 1)
+                    break
+    except Exception:
+        pass
+    try:
+        paths = [
+            "/sys/class/dmi/id/product_name",
+            "/sys/class/dmi/id/sys_vendor",
+            "/sys/class/dmi/id/product_serial",
+            "/sys/class/dmi/id/bios_version",
+        ]
+        for p in paths:
+            try:
+                with open(p) as f:
+                    val = f.read().strip()
+                    if "product_name" in p:
+                        hw["product_name"] = val
+                    elif "sys_vendor" in p:
+                        hw["manufacturer"] = val
+                    elif "product_serial" in p:
+                        hw["serial_number"] = val
+                    elif "bios_version" in p:
+                        hw["bios_version"] = val
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["lsblk", "-d", "-o", "NAME,SIZE,MODEL", "--json"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            disks = []
+            for dev in data.get("blockdevices", []):
+                disks.append({
+                    "name": dev.get("model", dev.get("name", "")),
+                    "size_gb": dev.get("size", ""),
+                    "type": "disk",
+                    "serial": "",
+                })
+            hw["disks"] = disks
+    except Exception:
+        pass
+    hw["gpu_models"] = []
+    hw["network_interfaces"] = []
+    hw["cpu_cores"] = os.cpu_count() or 0
+    return hw
+
+
+def collect_linux_software():
+    sw_list = []
+    try:
+        result = subprocess.run(
+            ["dpkg-query", "-f", "${Package}|${Version}|${Maintainer}\n", "-W"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                parts = line.strip().split("|")
+                if len(parts) >= 2:
+                    name, version = parts[0], parts[1]
+                    publisher = parts[2].split("<")[0].strip() if len(parts) > 2 and "<" in parts[2] else (parts[2] if len(parts) > 2 else "")
+                    sw_list.append({
+                        "name": name,
+                        "version": version,
+                        "publisher": publisher,
+                        "install_date": None,
+                        "size_mb": 0,
+                        "is_system": True,
+                    })
+    except Exception:
+        pass
+    if not sw_list:
+        try:
+            result = subprocess.run(
+                ["rpm", "-qa", "--queryformat", "%{NAME}|%{VERSION}|%{VENDOR}\n"],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.strip().split("|")
+                    if len(parts) >= 2:
+                        sw_list.append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "publisher": parts[2] if len(parts) > 2 else "",
+                            "install_date": None,
+                            "size_mb": 0,
+                            "is_system": True,
+                        })
+        except Exception:
+            pass
     return sw_list

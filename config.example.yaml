@@ -2,8 +2,8 @@
 # Copy to config.yaml and customize for your environment
 
 server:
-  url: "http://VANT-SIEM-SERVER:8003"
-  logs_url: "http://VANT-SIEM-SERVER:9201"
+  url: "http://127.0.0.1:8003"
+  logs_url: "http://127.0.0.1:9201"
   auth_mode: "none"  # none | basic | token
   auth_token: ""
   auth_username: ""

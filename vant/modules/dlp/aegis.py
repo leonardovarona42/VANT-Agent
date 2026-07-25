@@ -150,10 +150,32 @@ def _windows_scan_roots():
     return _expand_scan_paths([str(path) for path in roots])
 
 
+def _linux_scan_roots():
+    if os.name == "nt":
+        return []
+    roots = [Path.home()]
+    home_parent = Path("/home")
+    if home_parent.exists():
+        for profile in home_parent.iterdir():
+            if profile.is_dir() and profile.name not in {"lost+found"}:
+                for sub in ("Desktop", "Documents", "Downloads", "Escritorio", "Documentos", "Descargas"):
+                    p = profile / sub
+                    if p.exists():
+                        roots.append(p)
+    for shared in ("/opt", "/srv", "/var/www", "/tmp", "/var/tmp"):
+        p = Path(shared)
+        if p.exists():
+            roots.append(p)
+    return _expand_scan_paths([str(path) for path in roots])
+
+
 def _default_paths():
-    paths = _windows_scan_roots()
+    if os.name == "nt":
+        paths = _windows_scan_roots()
+    else:
+        paths = _linux_scan_roots()
     if not paths:
-        paths = _expand_scan_paths([str(Path.home()), str(Path(os.environ.get("TEMP", r"C:\Temp")))])
+        paths = _expand_scan_paths([str(Path.home()), "/tmp"])
     return paths
 
 
@@ -169,6 +191,7 @@ def _default_policy():
 
 
 def _iter_files(paths, extensions, max_file_size, max_files_per_scan=12000):
+    is_win = os.name == "nt"
     excluded_tokens = (
         "\\$recycle.bin",
         "\\system volume information",
@@ -178,6 +201,14 @@ def _iter_files(paths, extensions, max_file_size, max_files_per_scan=12000):
         "\\programdata\\package cache",
         "\\programdata\\microsoft\\windows\\wer",
         "\\programdata\\microsoft\\windows defender",
+    )
+    linux_excluded_tokens = (
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/lost+found",
+        "/.snapshots",
     )
     seen = set()
     yielded = 0
@@ -191,12 +222,21 @@ def _iter_files(paths, extensions, max_file_size, max_files_per_scan=12000):
         for root, dirs, files in os.walk(base, topdown=True, onerror=lambda exc: logging.getLogger("vant-agent").warning("walk error: %s", exc)):
             root_path = Path(root)
             root_low = str(root_path).lower()
-            if any(token in root_low for token in excluded_tokens):
+            if not is_win and any(token in root_low for token in linux_excluded_tokens):
                 continue
-            dirs[:] = [
-                d for d in dirs
-                if not any(token in f"{root_low}\\{d.lower()}" for token in excluded_tokens)
-            ]
+            if is_win and any(token in root_low for token in excluded_tokens):
+                continue
+            sep = "\\" if is_win else "/"
+            if is_win:
+                dirs[:] = [
+                    d for d in dirs
+                    if not any(token in f"{root_low}{sep}{d.lower()}" for token in excluded_tokens)
+                ]
+            else:
+                dirs[:] = [
+                    d for d in dirs
+                    if not any(token in f"{root_low}{sep}{d.lower()}" for token in linux_excluded_tokens)
+                ]
             for name in files:
                 path = Path(root) / name
                 if str(path) in seen:
@@ -481,27 +521,32 @@ def _sha256(path):
 
 
 def _file_owner(path):
-    if os.name != "nt":
-        return ""
+    if os.name == "nt":
+        try:
+            proc = run_hidden(
+                ["powershell", "-NoProfile", "-Command",
+                 "& {param($p) (Get-Acl -LiteralPath $p).Owner}",
+                 "-p", str(path)],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except Exception:
+            return ""
     try:
-        proc = run_hidden(
-            ["powershell", "-NoProfile", "-Command",
-             "& {param($p) (Get-Acl -LiteralPath $p).Owner}",
-             "-p", str(path)],
-            capture_output=True, text=True, timeout=8, check=False,
-        )
-        return proc.stdout.strip() if proc.returncode == 0 else ""
+        import pwd
+        stat_info = path.stat()
+        return pwd.getpwuid(stat_info.st_uid).pw_name
     except Exception:
         return ""
 
 
 def _path_channel(path):
     low = str(path).lower()
-    if "\\downloads\\" in low:
+    if "\\downloads\\" in low or "/downloads/" in low:
         return "downloads"
-    if "\\desktop\\" in low:
+    if "\\desktop\\" in low or "/desktop/" in low:
         return "desktop"
-    if "\\documents\\" in low:
+    if "\\documents\\" in low or "/documents/" in low:
         return "documents"
     return "filesystem"
 
@@ -525,15 +570,29 @@ def _metadata_haystack(path, content):
 
 
 def _detect_new_drives(state, state_path=None):
-    if os.name != "nt":
-        return [], state
-    known = set(state.get("known_drives") or [])
-    current = {str(d).lower() for d in _windows_fixed_drives()}
-    new_drives = current - known
-    state["known_drives"] = sorted(current)
-    if new_drives and state_path:
+    if os.name == "nt":
+        known = set(state.get("known_drives") or [])
+        current = {str(d).lower() for d in _windows_fixed_drives()}
+        new_drives = current - known
+        state["known_drives"] = sorted(current)
+        if new_drives and state_path:
+            _save_state(state_path, state)
+        return [Path(d) for d in new_drives], state
+    known = set(state.get("known_mounts") or [])
+    current = set()
+    try:
+        result = subprocess.run(["mount", "-l"], capture_output=True, text=True, timeout=10, check=False)
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0].startswith("/dev/"):
+                current.add(parts[2].lower())
+    except Exception:
+        pass
+    new_mounts = current - known
+    state["known_mounts"] = sorted(current)
+    if new_mounts and state_path:
         _save_state(state_path, state)
-    return [Path(d) for d in new_drives], state
+    return [Path(d) for d in new_mounts], state
 
 
 class AegisDlpService:
@@ -553,6 +612,19 @@ class AegisDlpService:
             if not known:
                 current = {str(d).lower() for d in _windows_fixed_drives()}
                 self.state["known_drives"] = sorted(current)
+        else:
+            known = set(self.state.get("known_mounts") or [])
+            if not known:
+                current = set()
+                try:
+                    result = subprocess.run(["mount", "-l"], capture_output=True, text=True, timeout=10, check=False)
+                    for line in result.stdout.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[0].startswith("/dev/"):
+                            current.add(parts[2].lower())
+                except Exception:
+                    pass
+                self.state["known_mounts"] = sorted(current)
 
     def detect_new_drives(self):
         new, self.state = _detect_new_drives(self.state, self.state_path)

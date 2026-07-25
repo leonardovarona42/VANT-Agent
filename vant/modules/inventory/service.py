@@ -7,7 +7,9 @@ from pathlib import Path
 
 from vant.utils import detect_host, detect_os, get_mac_address
 from vant.modules.inventory.collector import (
-    collect_windows_hardware, collect_windows_software, detect_os_type,
+    collect_windows_hardware, collect_windows_software,
+    collect_linux_hardware, collect_linux_software,
+    detect_os_type,
 )
 
 
@@ -114,15 +116,8 @@ class InventoryService:
             hw = collect_windows_hardware()
             sw = collect_windows_software()
         else:
-            hw = {
-                "cpu_model": platform.machine(),
-                "cpu_cores": 0,
-                "ram_total_gb": 0,
-                "disks": [],
-                "gpu_models": [],
-                "network_interfaces": [],
-            }
-            sw = []
+            hw = collect_linux_hardware()
+            sw = collect_linux_software()
 
         try:
             resp = client.submit_inventory(self.agent_id, hw, sw)

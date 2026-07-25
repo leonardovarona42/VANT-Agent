@@ -16,17 +16,29 @@ from collections import defaultdict
 import yaml
 import requests
 
-from collectors.snort import SnortCollector
-from collectors.suricata import SuricataCollector
 try:
-    from collectors.windows_eventlog import WindowsEventLogCollector
+    from collectors.snort import SnortCollector
+    from collectors.suricata import SuricataCollector
+    try:
+        from collectors.windows_eventlog import WindowsEventLogCollector
+    except ImportError:
+        WindowsEventLogCollector = None
+    from collectors.postgres_log import PostgresLogCollector
+    from collectors.file_log import FileLogCollector
+    from output import OutputClient
+    from services.audit_inventory import AuditInventoryService
+    from services.aegis_dlp import AegisDlpService
+    LEGACY_COLLECTORS = True
 except ImportError:
+    LEGACY_COLLECTORS = False
+    SnortCollector = None
+    SuricataCollector = None
     WindowsEventLogCollector = None
-from collectors.postgres_log import PostgresLogCollector
-from collectors.file_log import FileLogCollector
-from output import OutputClient
-from services.audit_inventory import AuditInventoryService
-from services.aegis_dlp import AegisDlpService
+    PostgresLogCollector = None
+    FileLogCollector = None
+    OutputClient = None
+    AuditInventoryService = None
+    AegisDlpService = None
 
 AGENT_VERSION = "v1.01"
 
@@ -86,6 +98,11 @@ def _apply_push_config(config_path, payload, logger, control_server, control_tok
             dlp_cfg = cfg.get("aegis_dlp", {})
             dlp_cfg.update(new_config["dlp"])
             cfg["aegis_dlp"] = dlp_cfg
+
+        if "monitoring" in new_config:
+            mon_cfg = cfg.get("monitoring", {})
+            mon_cfg.update(new_config["monitoring"])
+            cfg["monitoring"] = mon_cfg
 
         config_text = yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
         Path(config_path).write_text(config_text, encoding="utf-8")
@@ -644,6 +661,65 @@ def run_with_stop(config_path, stop_event):
                                         control_token,
                                         timeout=8,
                                     )
+                            elif cmd_type == "list_services":
+                                logger.info("command.list_services received")
+                                try:
+                                    from vant.modules.heartbeat.service import HeartbeatService
+                                    hb = HeartbeatService({}, logger)
+                                    result = hb._list_services()
+                                    _control_post(
+                                        f"{control_server}/inventory/api/command-result/",
+                                        {
+                                            "command_id": cmd_id,
+                                            "status": "completed",
+                                            "result": result,
+                                        },
+                                        control_token,
+                                        timeout=30,
+                                    )
+                                    logger.info("list_services result services=%d apt=%d",
+                                               len(result.get("services", [])),
+                                               len(result.get("apt_updates", [])))
+                                except Exception as exc:
+                                    logger.exception("list_services failed error=%s", exc)
+                                    _control_post(
+                                        f"{control_server}/inventory/api/command-result/",
+                                        {
+                                            "command_id": cmd_id,
+                                            "status": "failed",
+                                            "error": str(exc),
+                                        },
+                                        control_token,
+                                        timeout=8,
+                                    )
+                            elif cmd_type == "list_apt_updates":
+                                logger.info("command.list_apt_updates received")
+                                try:
+                                    from vant.modules.heartbeat.service import HeartbeatService
+                                    hb = HeartbeatService({}, logger)
+                                    result = hb._list_apt_updates()
+                                    _control_post(
+                                        f"{control_server}/inventory/api/command-result/",
+                                        {
+                                            "command_id": cmd_id,
+                                            "status": "completed",
+                                            "result": result,
+                                        },
+                                        control_token,
+                                        timeout=30,
+                                    )
+                                except Exception as exc:
+                                    logger.exception("list_apt_updates failed error=%s", exc)
+                                    _control_post(
+                                        f"{control_server}/inventory/api/command-result/",
+                                        {
+                                            "command_id": cmd_id,
+                                            "status": "failed",
+                                            "error": str(exc),
+                                        },
+                                        control_token,
+                                        timeout=8,
+                                    )
                     next_control = now + control_poll
                 except Exception as exc:
                     logger.warning("control poll failed error=%s", exc)
@@ -707,6 +783,13 @@ def run_with_stop(config_path, stop_event):
 
 
 def run(config_path):
+    if not LEGACY_COLLECTORS:
+        try:
+            from vant.main import run as vant_run
+            vant_run(config_path)
+            return
+        except Exception as e:
+            print(f"Failed to use vant.main: {e}")
     stop_event = threading.Event()
     run_with_stop(config_path, stop_event)
 

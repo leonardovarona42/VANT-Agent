@@ -7,7 +7,11 @@ import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vant.utils import run_hidden
+import sys
+try:
+    from vant.utils import run_hidden
+except ImportError:
+    from subprocess import run as run_hidden
 
 
 def _utc_now():
@@ -404,17 +408,19 @@ class AuditInventoryService:
         self.state = _load_state(self.state_path)
 
     def collect(self):
-        inventory = _collect_windows_inventory() if os.name == "nt" else {
-            "host": socket.gethostname(),
-            "os": platform.platform(),
-            "collected_at": _utc_now(),
-            "hardware": [],
-            "software": [],
-            "network": [],
-            "users": [],
-            "usb_devices": [],
-            "raw": {},
-        }
+        if os.name != "nt":
+            return {
+                "host": socket.gethostname(),
+                "os": platform.platform(),
+                "collected_at": _utc_now(),
+                "hardware": [],
+                "software": [],
+                "network": [],
+                "users": [],
+                "usb_devices": [],
+                "raw": {},
+            }
+        inventory = _collect_windows_inventory()
 
         events = self._build_timeline_events(inventory)
         inventory["timeline_events"] = events

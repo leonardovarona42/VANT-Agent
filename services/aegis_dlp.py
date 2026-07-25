@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile
 
-from vant.utils import run_hidden
+import sys
+try:
+    from vant.utils import run_hidden
+except ImportError:
+    from subprocess import run as run_hidden
 
 import requests
 
@@ -400,7 +404,7 @@ class AegisDlpService:
             return self.remote_config
         try:
             response = requests.post(
-                f"{control_server}/api/agent/dlp/config/",
+                f"{control_server}/inventory/api/agent/dlp/config/",
                 json={"agent_id": agent_id},
                 headers={"Authorization": f"Bearer {token}"} if token else {},
                 timeout=10,

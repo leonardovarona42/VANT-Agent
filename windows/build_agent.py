@@ -49,10 +49,17 @@ def _clean():
     for d in ["build", "dist", "__pycache__"]:
         p = _here() / d
         if p.exists():
-            shutil.rmtree(p)
-            print(f"  + Limpiado: {d}/")
+            try:
+                shutil.rmtree(p)
+                print(f"  + Limpiado: {d}/")
+            except Exception as e:
+                print(f"  ! No se pudo limpiar {d}/: {e}")
+                print(f"  ! Continuando de todas formas...")
     for spec in _here().parent.glob("*.spec"):
-        spec.unlink()
+        try:
+            spec.unlink()
+        except Exception:
+            pass
 
 
 def _build():

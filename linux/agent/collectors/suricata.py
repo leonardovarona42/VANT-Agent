@@ -55,7 +55,7 @@ class SuricataCollector(CollectorBase):
                     "source_type": self.source_type,
                     "source_name": "suricata",
                     "host_name": self.agent_cfg.get("host_name", ""),
-                    "host_ip": self._host_ip,
+                    "host_ip": "",
                     "event_time": ts,
                     "severity": str(payload.get("alert", {}).get("severity", "")),
                     "event_category": payload.get("event_type", "ids.event"),

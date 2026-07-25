@@ -9,9 +9,8 @@ class VantClient:
         output = cfg.get("output", {})
 
         self.base_url = (
-            control.get("server_url", server.get("url", "http://localhost:8000"))
-            .rstrip("/")
-        )
+            control.get("server_url") or server.get("url") or "http://localhost:8000"
+        ).rstrip("/")
 
         logs_base = server.get("logs_url", "http://localhost:9201").rstrip("/")
         self.ingest_endpoint = (

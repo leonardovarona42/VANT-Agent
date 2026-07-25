@@ -2,6 +2,8 @@
 """
 VANT-Agent Windows Installer - GUI Wizard
 """
+import hashlib
+import hmac
 import os
 import sys
 import socket
@@ -27,12 +29,17 @@ from PyQt6.QtGui import QFont
 
 _VERSION = "1.1.0"
 
-# Default VANT-SIEM server URL (direct Django server, not through nginx)
-DEFAULT_SERVER_URL = "http://192.168.12.43:8000"
+DEFAULT_SERVER_URL = "https://192.168.12.43"
 
-# Pre-configured API credentials for agent authentication
-AGENT_API_USER = "agent_api"
-AGENT_API_PASS = "VantAgent2024!"
+def _http_session():
+    s = requests.Session()
+    s.verify = False
+    s.timeout = 10
+    return s
+
+def _sign_request(secret, agent_id, host_name, timestamp):
+    message = f"{agent_id}:{host_name}:{timestamp}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def _map_os_type():
@@ -77,36 +84,78 @@ def _get_local_ip():
 
 
 class ConnectionTestThread(QThread):
-    result = pyqtSignal(bool, dict)
+    result = pyqtSignal(bool, dict, str)
 
-    def __init__(self, server_url):
+    def __init__(self, server_url, agent_id, host_name):
         super().__init__()
         self.server_url = server_url.rstrip("/")
+        self.agent_id = agent_id
+        self.host_name = host_name
 
     def run(self):
-        results = {"control": (False, ""), "logs": (False, ""), "dlp": (False, "")}
+        results = {}
         all_ok = True
-        auth = (AGENT_API_USER, AGENT_API_PASS)
+        sess = _http_session()
 
-        for name, path in [("control", "/inventory/api/health/"), ("logs", "/logs/api/health/"), ("dlp", "/aegis/api/agent/dlp/config/")]:
+        # Step 1: get bootstrap shared secret from server
+        shared_secret = ""
+        try:
+            r = sess.get(f"{self.server_url}/inventory/api/agent/bootstrap/", timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("ok") and data.get("shared_secret"):
+                    shared_secret = data["shared_secret"]
+                    results["bootstrap"] = (True, "Token bootstrap obtenido del servidor")
+                else:
+                    results["bootstrap"] = (False, "Bootstrap: respuesta invalida")
+                    all_ok = False
+            else:
+                results["bootstrap"] = (False, f"Bootstrap: HTTP {r.status_code}")
+                all_ok = False
+        except requests.exceptions.SSLError as e:
+            all_ok = False
+            results["bootstrap"] = (False, f"Error SSL: {e}")
+        except requests.exceptions.ConnectionError as e:
+            all_ok = False
+            results["bootstrap"] = (False, f"Sin conexion: {e}")
+        except Exception as e:
+            all_ok = False
+            results["bootstrap"] = (False, f"Error: {e}")
+
+        # Step 2: test enrollment endpoint with the bootstrap secret
+        if shared_secret:
             try:
-                r = requests.get(f"{self.server_url}{path}", timeout=5, verify=False, auth=auth)
-                if r.status_code in (200, 302):
-                    results[name] = (True, f"{name.title()}: OK (HTTP {r.status_code})")
+                timestamp = str(int(time.time()))
+                signature = _sign_request(shared_secret, self.agent_id, self.host_name, timestamp)
+                payload = {
+                    "agent_id": self.agent_id,
+                    "host_name": self.host_name,
+                    "timestamp": timestamp,
+                    "signature": signature,
+                }
+                r = sess.post(f"{self.server_url}/inventory/api/agent/enroll/", json=payload)
+                if r.status_code in (200, 403):
+                    results["server"] = (True, f"Servidor accesible (HTTP {r.status_code})")
                 else:
                     all_ok = False
-                    results[name] = (False, f"{name.title()}: HTTP {r.status_code}")
+                    results["server"] = (False, f"Servidor: HTTP {r.status_code}")
+            except requests.exceptions.SSLError as e:
+                all_ok = False
+                results["server"] = (False, f"Error SSL: {e}")
+            except requests.exceptions.ConnectionError as e:
+                all_ok = False
+                results["server"] = (False, f"Sin conexion: {e}")
             except Exception as e:
                 all_ok = False
-                results[name] = (False, f"{name.title()}: {e}")
+                results["server"] = (False, f"Error: {e}")
 
-        self.result.emit(all_ok, results)
+        self.result.emit(all_ok, results, shared_secret)
 
 
 class EnrollmentThread(QThread):
     result = pyqtSignal(bool, dict, str)
 
-    def __init__(self, server_url, hostname, mac, os_type, os_version, os_arch, ip_address):
+    def __init__(self, server_url, hostname, mac, os_type, os_version, os_arch, ip_address, agent_id, shared_secret):
         super().__init__()
         self.server_url = server_url.rstrip("/")
         self.hostname = hostname
@@ -115,35 +164,43 @@ class EnrollmentThread(QThread):
         self.os_version = os_version
         self.os_arch = os_arch
         self.ip_address = ip_address
+        self.agent_id = agent_id
+        self.shared_secret = shared_secret
 
     def run(self):
+        sess = _http_session()
         try:
+            timestamp = str(int(time.time()))
+            signature = _sign_request(self.shared_secret, self.agent_id, self.hostname, timestamp)
             payload = {
-                "hostname": self.hostname,
-                "mac_address": self.mac,
+                "agent_id": self.agent_id,
+                "host_name": self.hostname,
+                "timestamp": timestamp,
+                "signature": signature,
                 "os_type": self.os_type,
                 "os_version": self.os_version,
                 "os_arch": self.os_arch,
-                "agent_version": _VERSION,
                 "ip_address": self.ip_address,
-                "machine_name": self.hostname,
+                "mac_address": self.mac,
+                "agent_version": _VERSION,
             }
-            r = requests.post(
-                f"{self.server_url}/inventory/api/register/",
-                json=payload,
-                timeout=10,
-                verify=False,
-            )
+            r = sess.post(f"{self.server_url}/inventory/api/agent/enroll/", json=payload)
             try:
                 resp_data = r.json()
             except Exception:
                 resp_data = {}
 
-            if r.status_code in (200, 201):
+            if r.status_code == 200 and resp_data.get("ok"):
                 self.result.emit(True, resp_data, "")
             else:
-                errors = resp_data if isinstance(resp_data, dict) else {}
-                self.result.emit(False, {}, f"HTTP {r.status_code}: {errors}")
+                error_msg = resp_data.get("error", "") if isinstance(resp_data, dict) else str(resp_data)
+                if not error_msg:
+                    error_msg = f"HTTP {r.status_code}"
+                self.result.emit(False, {}, error_msg)
+        except requests.exceptions.SSLError as e:
+            self.result.emit(False, {}, f"Error SSL: {e}")
+        except requests.exceptions.ConnectionError as e:
+            self.result.emit(False, {}, f"Sin conexion: {e}")
         except Exception as e:
             self.result.emit(False, {}, str(e))
 
@@ -157,55 +214,75 @@ class InstallerThread(QThread):
         self.config = config
         self.install_dir = install_dir
 
+    def _find_embedded(self, name):
+        candidates = [
+            Path(getattr(sys, "_MEIPASS", "")) / name,
+            Path(__file__).parent / name,
+            Path(sys.executable).parent / name,
+        ]
+        for p in candidates:
+            if p and p.exists():
+                return p
+        return None
+
     def run(self):
         try:
             self.progress.emit(5, "Preparing installation directory...")
             os.makedirs(self.install_dir, exist_ok=True)
 
-            self.progress.emit(20, "Copying agent executable...")
-            src_exe = None
-            candidates = [
-                Path(__file__).parent / "VANT-Agent.exe",
-                Path(getattr(sys, "_MEIPASS", "")) / "VANT-Agent.exe" if getattr(sys, "_MEIPASS", None) else None,
-                Path(sys.executable).parent / "VANT-Agent.exe",
-                Path(sys.executable).parent.parent / "dist" / "VANT-Agent.exe",
+            tools = [
+                ("VANT-Agent.exe", "Copying agent executable..."),
+                ("sendheartbeat.exe", "Copying heartbeat tool..."),
+                ("opena_mover.exe", "Copying log mover tool..."),
+                ("opena_checker.exe", "Copying health checker tool..."),
+                ("Uninstall-VANT-OpenSearch-Agent.exe", "Copying uninstaller..."),
+                ("logo.png", "Copying logo..."),
             ]
-            for p in candidates:
-                if p and p.exists():
-                    src_exe = p
-                    break
-            if not src_exe:
-                self.finished.emit(False, "VANT-Agent.exe not found in installer package.")
-                return
-            dst_exe = Path(self.install_dir) / "VANT-Agent.exe"
-            shutil.copy2(str(src_exe), str(dst_exe))
-
-            logo_candidates = [
-                Path(getattr(sys, "_MEIPASS", "")) / "logo.png",
-                Path(__file__).parent / "logo.png",
-                Path(sys.executable).parent / "logo.png",
-            ]
-            for lc in logo_candidates:
-                if lc and lc.exists():
-                    shutil.copy2(str(lc), str(Path(self.install_dir) / "logo.png"))
-                    break
+            for name, msg in tools:
+                self.progress.emit(20, msg)
+                src = self._find_embedded(name)
+                if src:
+                    shutil.copy2(str(src), str(Path(self.install_dir) / name))
 
             self.progress.emit(45, "Generating configuration...")
             server_base = self.config["server_url"].rstrip("/")
+            is_https = server_base.startswith("https")
             config_data = {
                 "agent": {
                     "id": self.config.get("agent_id", "agent-windows"),
                     "host_name": self.config.get("_hostname", ""),
                     "interval_seconds": 10,
+                    "log_level": "INFO",
+                    "log_file": "",
+                    "log_max_bytes": 10485760,
+                    "log_backup_count": 5,
+                    "log_every_cycles": 1,
                 },
-                "server": {
-                    "url": server_base,
-                    "logs_url": server_base,
-                    "auth_mode": "basic",
-                    "auth_username": AGENT_API_USER,
-                    "auth_password": AGENT_API_PASS,
-                    "timeout": 15,
-                    "tls": {"verify": False},
+                "output": {
+                    "endpoint": f"{server_base}/logs/api/ingest/bulk/",
+                    "source_endpoint": f"{server_base}/logs/api/sources/",
+                    "timeout_seconds": 10,
+                    "auth": {
+                        "mode": "token",
+                        "username": "",
+                        "password": "",
+                        "token": self.config.get("enrollment_token", ""),
+                    },
+                    "tls": {
+                        "enabled": False,
+                        "verify": False,
+                        "ca_cert": "",
+                    },
+                },
+                "control": {
+                    "server_url": server_base,
+                    "require_https": bool(is_https),
+                    "token": self.config.get("enrollment_token", ""),
+                    "poll_seconds": 30,
+                    "verify_ssl": False,
+                    "inventory_seconds": 86400,
+                    "dlp_poll_seconds": 60,
+                    "dlp_scan_seconds": 30,
                 },
                 "collectors": {
                     "windows_eventlog": {
@@ -275,7 +352,7 @@ class InstallerThread(QThread):
 
             schtask_cmd = (
                 f'schtasks /Create /TN "{task_name}" '
-                f'/TR "\\"{dst_exe}\\" --tray --config \\"{config_path}\\"" '
+                f'/TR "\\"{dst_exe}\\" --config \\"{config_path}\\"" '
                 f"/SC ONLOGON /RL HIGHEST /F"
             )
             subprocess.run(schtask_cmd, shell=True, capture_output=True, timeout=30)
@@ -283,7 +360,7 @@ class InstallerThread(QThread):
             self.progress.emit(98, "Launching agent...")
             try:
                 proc = subprocess.Popen(
-                    [str(dst_exe), "--tray", "--config", str(config_path)],
+                    [str(dst_exe), "--config", str(config_path)],
                     cwd=self.install_dir,
                 )
                 self._agent_pid = proc.pid
@@ -516,6 +593,66 @@ class CompletePage(WizardPage):
 
         self.layout.addStretch()
 
+        uninstall_btn = QPushButton("Uninstall Agent")
+        uninstall_btn.setFont(QFont("Segoe UI", 10))
+        uninstall_btn.setStyleSheet(
+            "QPushButton { background-color: #d93025; color: white; padding: 8px 20px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #b3261e; }"
+        )
+        uninstall_btn.clicked.connect(self._uninstall)
+        self.layout.addWidget(uninstall_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._uninstall_btn = uninstall_btn
+        self._parent_window = parent
+
+    def _uninstall(self):
+        self._uninstall_btn.setEnabled(False)
+        self._uninstall_btn.setText("Uninstalling...")
+        install_dir = getattr(self._parent_window, '_install_dir', r'C:\Program Files\VANT-Agent') if self._parent_window else r'C:\Program Files\VANT-Agent'
+        t = UninstallThread(install_dir)
+        t.finished.connect(self._on_uninstall_finished)
+        self._uninstall_thread = t
+        t.start()
+
+    def _on_uninstall_finished(self, ok, msg):
+        self._uninstall_btn.setEnabled(True)
+        self._uninstall_btn.setText("Uninstall Agent")
+        if ok:
+            self.summary.setText("Agent has been uninstalled successfully.\n\n" + msg)
+            self._uninstall_btn.setVisible(False)
+        else:
+            self.summary.setText("Uninstall failed:\n" + msg)
+            QMessageBox.critical(self, "Uninstall Failed", msg)
+
+
+class UninstallThread(QThread):
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, install_dir):
+        super().__init__()
+        self.install_dir = install_dir
+
+    def run(self):
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Get-Process -Name VANT-Agent -ErrorAction SilentlyContinue | Stop-Process -Force"],
+                capture_output=True, timeout=15,
+            )
+            task_name = "VANT-SIEM-Agent"
+            subprocess.run(
+                ["schtasks", "/Delete", "/TN", task_name, "/F"],
+                capture_output=True, timeout=10,
+            )
+            desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop" / "VANT-Agent.lnk"
+            if desktop.exists():
+                desktop.unlink()
+            import shutil
+            path = Path(self.install_dir)
+            if path.exists():
+                shutil.rmtree(str(path))
+            self.finished.emit(True, f"Removed: {self.install_dir}")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
 
 class InstallerWindow(QMainWindow):
     def __init__(self):
@@ -615,11 +752,13 @@ class InstallerWindow(QMainWindow):
         self.server_page.test_btn.setText("Testing...")
         self.server_page.status_label.setText("")
 
-        self._conn_thread = ConnectionTestThread(server_url)
+        agent_id = self.config.get("agent_id", socket.gethostname())
+        host_name = socket.gethostname()
+        self._conn_thread = ConnectionTestThread(server_url, agent_id, host_name)
         self._conn_thread.result.connect(self._on_conn_result)
         self._conn_thread.start()
 
-    def _on_conn_result(self, ok, results):
+    def _on_conn_result(self, ok, results, shared_secret):
         self.server_page.test_btn.setEnabled(True)
         self.server_page.test_btn.setText("Test Connection")
 
@@ -631,6 +770,7 @@ class InstallerWindow(QMainWindow):
         self.server_page.status_label.setText("\n".join(lines))
         if ok:
             self.server_page.status_label.setStyleSheet("color: #1e8e3e;")
+            self.config["shared_secret"] = shared_secret
         else:
             self.server_page.status_label.setStyleSheet("color: #d93025;")
 
@@ -666,6 +806,7 @@ class InstallerWindow(QMainWindow):
         self.enrollment_page.enroll_btn.setText("Enrolling...")
         self.enrollment_page.info_label.setText("Sending registration request...")
 
+        shared_secret = self.config.get("shared_secret", "")
         self._enroll_thread = EnrollmentThread(
             self.config["server_url"],
             self.config.get("_hostname", _get_hostname()),
@@ -674,6 +815,8 @@ class InstallerWindow(QMainWindow):
             self.config["_os_version"],
             self.config["_os_arch"],
             self.config["_ip_address"],
+            self.config.get("agent_id", socket.gethostname()),
+            shared_secret,
         )
         self._enroll_thread.result.connect(self._on_enroll_result)
         self._enroll_thread.start()
@@ -682,15 +825,13 @@ class InstallerWindow(QMainWindow):
         self.enrollment_page.enroll_btn.setEnabled(True)
         self.enrollment_page.enroll_btn.setText("Enroll Agent")
         if ok:
-            self.config["agent_id"] = data.get("agent_id", "")
-            self.config["enrollment_status"] = data.get("status", "online")
-            self.config["created"] = data.get("created", False)
+            self.config["agent_id"] = data.get("agent_id", socket.gethostname())
+            self.config["enrollment_token"] = data.get("token", "")
             self.enrollment_page.info_label.setStyleSheet("color: #1e8e3e;")
-            action = "registered" if self.config["created"] else "found (already enrolled)"
             self.enrollment_page.info_label.setText(
-                f"Agent {action} successfully!\n"
+                f"Agent enrolled successfully!\n"
                 f"Agent ID: {self.config['agent_id']}\n"
-                f"Status: {self.config['enrollment_status']}"
+                f"Token: {self.config['enrollment_token'][:16]}..."
             )
         else:
             self.enrollment_page.info_label.setStyleSheet("color: #d93025;")
@@ -702,6 +843,7 @@ class InstallerWindow(QMainWindow):
         self.install_page.progress.setValue(0)
 
         install_dir = self.install_page.install_dir.text().strip()
+        self._install_dir = install_dir
         self._inst_thread = InstallerThread(self.config, install_dir)
         self._inst_thread.progress.connect(self._on_inst_progress)
         self._inst_thread.finished.connect(self._on_inst_finished)

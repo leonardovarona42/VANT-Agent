@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import re
+import struct
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,56 +119,27 @@ def _windows_fixed_drives():
 def _windows_scan_roots():
     if os.name != "nt":
         return []
-    roots = []
-    system_drive = os.environ.get("SystemDrive", "C:").rstrip("\\/")
-    users_root = Path(f"{system_drive}\\") / "Users"
-    public_root = users_root / "Public"
-    roots.extend([
-        public_root / "Desktop",
-        public_root / "Documents",
-        public_root / "Downloads",
-        public_root / "OneDrive",
-    ])
-    if users_root.exists():
-        for profile in users_root.iterdir():
-            if not profile.is_dir():
-                continue
-            if profile.name.lower() in {"all users", "default", "default user", "public"}:
-                continue
-            roots.extend([
-                profile / "Desktop",
-                profile / "Documents",
-                profile / "Downloads",
-                profile / "OneDrive",
-                profile / "OneDrive - Personal",
-            ])
-    program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
-    roots.extend([
-        program_data,
-        program_data / "VANT",
-        Path(os.environ.get("TEMP", r"C:\Temp")),
-        Path(os.environ.get("TMP", r"C:\Temp")),
-    ])
-    roots.extend(_windows_fixed_drives())
+    roots = _windows_fixed_drives()
     return _expand_scan_paths([str(path) for path in roots])
 
 
 def _linux_scan_roots():
     if os.name == "nt":
         return []
-    roots = [Path.home()]
-    home_parent = Path("/home")
-    if home_parent.exists():
-        for profile in home_parent.iterdir():
-            if profile.is_dir() and profile.name not in {"lost+found"}:
-                for sub in ("Desktop", "Documents", "Downloads", "Escritorio", "Documentos", "Descargas"):
-                    p = profile / sub
-                    if p.exists():
-                        roots.append(p)
-    for shared in ("/opt", "/srv", "/var/www", "/tmp", "/var/tmp"):
-        p = Path(shared)
-        if p.exists():
-            roots.append(p)
+    roots = [Path("/")]
+    try:
+        result = subprocess.run(
+            ["findmnt", "-rno", "TARGET,SOURCE,FSTYPE"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].startswith("/dev/"):
+                mount = parts[0]
+                if mount not in ("/", "/proc", "/sys", "/dev", "/run", "/boot/efi"):
+                    roots.append(Path(mount))
+    except Exception:
+        pass
     return _expand_scan_paths([str(path) for path in roots])
 
 
@@ -595,6 +569,220 @@ def _detect_new_drives(state, state_path=None):
     return [Path(d) for d in new_mounts], state
 
 
+class InotifyWatcher:
+    """Real-time filesystem watcher using Linux inotify (no pip dependencies)."""
+
+    IN_MODIFY = 0x00000002
+    IN_CREATE = 0x00000100
+    IN_MOVED_TO = 0x00000080
+    IN_DELETE = 0x00000400
+    IN_Q_OVERFLOW = 0x00004000
+    IN_IS_DIR = 0x40000000
+    EVENTS_MASK = IN_MODIFY | IN_CREATE | IN_MOVED_TO | IN_DELETE | IN_Q_OVERFLOW
+
+    def __init__(self, scan_paths, extensions, on_event_callback=None):
+        self.logger = logging.getLogger("vant-agent.dlp.watchdog")
+        self.scan_paths = scan_paths
+        self.extensions = extensions
+        self.on_event = on_event_callback
+        self._fd = -1
+        self._wd_map = {}
+        self._running = False
+        self._thread = None
+        self._new_files_queue = []
+        self._lock = threading.Lock()
+
+    def _init_inotify(self):
+        try:
+            import ctypes
+            import ctypes.util
+            libc_path = ctypes.util.find_library("c")
+            if not libc_path:
+                return False
+            libc = ctypes.CDLL(libc_path, use_errno=True)
+            self._inotify_init = libc.inotify_init
+            self._inotify_init.restype = ctypes.c_int
+            self._inotify_add_watch = libc.inotify_add_watch
+            self._inotify_add_watch.restype = ctypes.c_int
+            self._inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+            self._inotify_rm_watch = libc.inotify_rm_watch
+            self._inotify_rm_watch.restype = ctypes.c_int
+            self._inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+            self._fd = self._inotify_init()
+            if self._fd < 0:
+                return False
+            return True
+        except Exception as exc:
+            self.logger.warning("inotify init failed: %s", exc)
+            return False
+
+    def _add_watch_recursive(self, path, max_depth=4, current_depth=0):
+        if current_depth > max_depth:
+            return
+        try:
+            p = Path(path)
+            if not p.exists() or not p.is_dir():
+                return
+            wd = self._inotify_add_watch(
+                self._fd, str(path).encode("utf-8"),
+                self.EVENTS_MASK,
+            )
+            if wd >= 0:
+                self._wd_map[wd] = str(path)
+        except Exception:
+            return
+        if current_depth < max_depth:
+            try:
+                for child in Path(path).iterdir():
+                    if child.is_dir() and not child.name.startswith("."):
+                        self._add_watch_recursive(child, max_depth, current_depth + 1)
+            except Exception:
+                pass
+
+    def start(self):
+        if os.name == "nt":
+            self.logger.info("inotify not available on Windows, using drive-polling fallback")
+            return False
+        if not self._init_inotify():
+            return False
+        for path in self.scan_paths:
+            self._add_watch_recursive(path, max_depth=3)
+        self._running = True
+        self._thread = threading.Thread(target=self._watch_loop, daemon=True, name="dlp-inotify")
+        self._thread.start()
+        self.logger.info("inotify watcher started on %d directories", len(self._wd_map))
+        return True
+
+    def stop(self):
+        self._running = False
+        if self._fd >= 0:
+            for wd in self._wd_map:
+                try:
+                    self._inotify_rm_watch(self._fd, wd)
+                except Exception:
+                    pass
+            try:
+                os.close(self._fd)
+            except Exception:
+                pass
+            self._fd = -1
+        self._wd_map.clear()
+
+    def _watch_loop(self):
+        import select
+        while self._running:
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 2.0)
+                if not ready:
+                    continue
+                data = os.read(self._fd, 65536)
+                offset = 0
+                while offset < len(data):
+                    wd, mask, cookie, name_len = struct.unpack("iIII", data[offset:offset + 16])
+                    offset += 16
+                    name = data[offset:offset + name_len].rstrip(b"\x00").decode("utf-8", errors="ignore")
+                    offset += name_len
+                    if mask & self.IN_Q_OVERFLOW:
+                        continue
+                    if mask & self.IN_IS_DIR:
+                        continue
+                    if not name:
+                        continue
+                    ext = Path(name).suffix.lower()
+                    if self.extensions and ext not in self.extensions:
+                        continue
+                    dir_path = self._wd_map.get(wd, "")
+                    if dir_path:
+                        full_path = os.path.join(dir_path, name)
+                        with self._lock:
+                            self._new_files_queue.append(full_path)
+                        if self.on_event:
+                            try:
+                                self.on_event(full_path, mask)
+                            except Exception:
+                                pass
+            except Exception as exc:
+                if self._running:
+                    self.logger.warning("inotify read error: %s", exc)
+                time.sleep(1)
+
+    def get_new_files(self):
+        with self._lock:
+            files = list(self._new_files_queue)
+            self._new_files_queue.clear()
+        return files
+
+
+class WindowsFileWatcher:
+    """Fallback file watcher for Windows using polling + drive detection."""
+
+    def __init__(self, scan_paths, extensions, on_event_callback=None):
+        self.logger = logging.getLogger("vant-agent.dlp.watcher")
+        self.scan_paths = scan_paths
+        self.extensions = extensions
+        self.on_event = on_event_callback
+        self._running = False
+        self._thread = None
+        self._new_files_queue = []
+        self._lock = threading.Lock()
+        self._snapshot = {}
+
+    def _take_snapshot(self):
+        snapshot = {}
+        for base in self.scan_paths:
+            try:
+                for root, dirs, files in os.walk(base, topdown=True, onerror=lambda e: None):
+                    for name in files:
+                        ext = Path(name).suffix.lower()
+                        if self.extensions and ext not in self.extensions:
+                            continue
+                        fp = os.path.join(root, name)
+                        try:
+                            st = os.stat(fp)
+                            snapshot[fp] = (int(st.st_mtime), st.st_size)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return snapshot
+
+    def start(self):
+        self._snapshot = self._take_snapshot()
+        self._running = True
+        self._thread = threading.Thread(target=self._watch_loop, daemon=True, name="dlp-winwatch")
+        self._thread.start()
+        self.logger.info("Windows file watcher started (polling every 10s)")
+        return True
+
+    def stop(self):
+        self._running = False
+
+    def _watch_loop(self):
+        while self._running:
+            time.sleep(10)
+            try:
+                new_snapshot = self._take_snapshot()
+                for fp, (mtime, size) in new_snapshot.items():
+                    if fp not in self._snapshot or self._snapshot[fp] != (mtime, size):
+                        with self._lock:
+                            self._new_files_queue.append(fp)
+                        if self.on_event:
+                            try:
+                                self.on_event(fp, 0x00000100)
+                            except Exception:
+                                pass
+                self._snapshot = new_snapshot
+            except Exception as exc:
+                if self._running:
+                    self.logger.warning("winwatch error: %s", exc)
+
+    def get_new_files(self):
+        with self._lock:
+            files = list(self._new_files_queue)
+            self._new_files_queue.clear()
+        return files
+
+
 class AegisDlpService:
     module_name = "aegis_dlp"
 
@@ -605,6 +793,7 @@ class AegisDlpService:
         self.state = _load_state(self.state_path)
         self.remote_config = {}
         self._init_drive_state()
+        self._watcher = None
 
     def _init_drive_state(self):
         if os.name == "nt":
@@ -629,6 +818,27 @@ class AegisDlpService:
     def detect_new_drives(self):
         new, self.state = _detect_new_drives(self.state, self.state_path)
         return new
+
+    def start_watcher(self, scan_paths, extensions):
+        if self._watcher is not None:
+            return
+        def _on_file_event(filepath, mask):
+            self.logger.debug("file event: %s mask=0x%x", filepath, mask)
+        if os.name == "nt":
+            self._watcher = WindowsFileWatcher(scan_paths, extensions, _on_file_event)
+        else:
+            self._watcher = InotifyWatcher(scan_paths, extensions, _on_file_event)
+        self._watcher.start()
+
+    def stop_watcher(self):
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher = None
+
+    def get_realtime_events(self):
+        if not self._watcher:
+            return []
+        return self._watcher.get_new_files()
 
     def fetch_remote_config(self, control_server, token, agent_id):
         if not control_server:
@@ -710,9 +920,15 @@ class AegisDlpService:
         monitored_extensions = set()
         max_file_size_mb = int(dlp_cfg.get("max_file_size_mb", 25) or 25)
         max_files_per_scan = int(dlp_cfg.get("max_files_per_scan", 12000) or 12000)
-        max_scan_seconds = int(dlp_cfg.get("max_scan_seconds", 20) or 20)
+        max_scan_seconds = int(dlp_cfg.get("max_scan_seconds", 0) or 0)
+        realtime_enabled = dlp_cfg.get("realtime_enabled", True)
+
         for policy in policies:
-            scan_paths.extend(policy.get("scan_paths") or [])
+            scan_mode = policy.get("scan_mode", "all")
+            if scan_mode == "all":
+                scan_paths = [str(path) for path in _default_paths()]
+            else:
+                scan_paths.extend(policy.get("scan_paths") or [])
             monitored_extensions.update([ext.lower() for ext in (policy.get("monitored_extensions") or [])])
             max_file_size_mb = max(max_file_size_mb, int(policy.get("max_file_size_mb", 10) or 10))
             for rule in policy.get("rules") or []:
@@ -722,6 +938,7 @@ class AegisDlpService:
         if new_drives:
             for d in new_drives:
                 scan_paths.append(str(d))
+                self.logger.info("new drive detected: %s, adding to scan", d)
 
         local_scan_paths = dlp_cfg.get("scan_paths") or []
         if local_scan_paths:
@@ -739,16 +956,35 @@ class AegisDlpService:
         paths = _expand_scan_paths(scan_paths)
         max_file_size = max_file_size_mb * 1024 * 1024
 
+        if realtime_enabled and self._watcher is None:
+            self.start_watcher(scan_paths, monitored_extensions)
+
+        realtime_files = self.get_realtime_events()
+
         incidents = []
         known = set(self.state.get("incident_keys", []))
         scan_cache = self.state.get("scan_cache") or {}
         updated_cache = {}
         started_at = time.monotonic()
+
+        files_to_scan = []
         for path in _iter_files(
             paths, monitored_extensions, max_file_size, max_files_per_scan=max_files_per_scan
         ):
             if max_scan_seconds > 0 and (time.monotonic() - started_at) >= max_scan_seconds:
                 break
+            files_to_scan.append(path)
+
+        for rf in realtime_files:
+            rp = Path(rf)
+            if rp.exists() and rp.suffix.lower() in monitored_extensions:
+                try:
+                    if rp.stat().st_size <= max_file_size:
+                        files_to_scan.append(rp)
+                except Exception:
+                    pass
+
+        for path in files_to_scan:
             try:
                 stat = path.stat()
                 cache_value = f"{int(stat.st_mtime)}:{stat.st_size}"

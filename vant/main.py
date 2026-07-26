@@ -1,6 +1,7 @@
 import argparse
 import sys
 import time
+import threading
 from pathlib import Path
 
 from vant.config import load_config, find_config
@@ -10,6 +11,8 @@ from vant.modules.inventory.service import InventoryService
 from vant.modules.heartbeat.service import HeartbeatService
 
 AGENT_VERSION = "1.1.0"
+
+DLP_SCAN_INTERVAL = 5
 
 
 def run_tray_mode(config_path):
@@ -185,6 +188,68 @@ def _ensure_host_fields(event, host_name, host_ip):
     return event
 
 
+def _dlp_scanner_thread(cfg, stop_event, logger):
+    try:
+        from vant.modules.dlp.aegis import AegisDlpService
+    except ImportError:
+        return
+    config_path = cfg.get("_config_path", "")
+    dlp_cfg = cfg.get("dlp", cfg.get("aegis_dlp", {}))
+    if not dlp_cfg.get("enabled", True):
+        return
+    try:
+        service = AegisDlpService(config_path, cfg)
+    except Exception as e:
+        logger.warning("dlp.init failed: %s", e)
+        return
+
+    server_cfg = cfg.get("server", {})
+    auth_cfg = cfg.get("auth", {}) or {}
+    dlp_server = dlp_cfg.get("server_url", "")
+    if not dlp_server:
+        base = server_cfg.get("url", "http://127.0.0.1:8003")
+        dlp_server = base.replace(":8003", ":8000").replace(":8080", ":8000")
+    token = cfg.get("_auth_token", "") or auth_cfg.get("token", server_cfg.get("auth_token", ""))
+    agent_id = cfg.get("agent", {}).get("id", "") or cfg.get("_agent_id", "")
+
+    logger.info("dlp.scanner started interval=%ss server=%s", DLP_SCAN_INTERVAL, dlp_server or "local")
+
+    fetch_cycle = 0
+    while not stop_event.is_set():
+        try:
+            if dlp_server and fetch_cycle % 12 == 0:
+                service.fetch_remote_config(dlp_server, token, agent_id)
+            fetch_cycle += 1
+            incidents = service.scan()
+            if incidents:
+                logger.info("dlp.scan new_threats=%d", len(incidents))
+            pending = service.peek_pending_incidents()
+            if pending and dlp_server:
+                batch = pending[:50]
+                logger.info("dlp.submit sending batch=%d total_pending=%d", len(batch), len(pending))
+                try:
+                    result = service.submit_threats(dlp_server, token, agent_id, batch)
+                    if result is not None:
+                        status_code = getattr(result, "status_code", 0)
+                        if 200 <= status_code < 300:
+                            sent_fps = {inc.get("fingerprint", "") for inc in batch}
+                            remaining = [inc for inc in pending if inc.get("fingerprint", "") not in sent_fps]
+                            service.state["pending_incidents"] = remaining
+                            from vant.modules.dlp.aegis import _save_state
+                            _save_state(service.state_path, service.state)
+                            logger.info("dlp.submitted count=%d status=%d remaining=%d", len(batch), status_code, len(remaining))
+                        else:
+                            body = getattr(result, "text", "")[:200]
+                            logger.warning("dlp.submit rejected status=%d body=%s", status_code, body)
+                    else:
+                        logger.warning("dlp.submit failed pending=%d", len(pending))
+                except Exception as se:
+                    logger.warning("dlp.submit exception: %s", se)
+        except Exception as e:
+            logger.warning("dlp.scan error: %s", e)
+        sleep_with_stop(stop_event, DLP_SCAN_INTERVAL)
+
+
 def run_with_stop(config_path, stop_event):
     cfg = load_config(config_path)
     cfg["_config_path"] = config_path
@@ -211,6 +276,7 @@ def run_with_stop(config_path, stop_event):
 
     hb_service = HeartbeatService(cfg, logger)
     screen_service = None
+    dlp_thread = None
 
     logger.info(
         "agent.starting version=%s host=%s ip=%s interval=%ss collectors=%s",
@@ -243,13 +309,30 @@ def run_with_stop(config_path, stop_event):
 
     if inv_service and inv_service.agent_id:
         agent_id = inv_service.agent_id
-        logger.info("agent registered id=%s", agent_id)
+        cfg.setdefault("agent", {})["id"] = agent_id
+        auth_token = inv_service._state.get("auth_token", "")
+        if auth_token:
+            cfg["_auth_token"] = auth_token
+        logger.info("agent registered id=%s has_token=%s", agent_id, bool(auth_token))
         try:
             from vant.modules.screen.service import ScreenCaptureService
             screen_service = ScreenCaptureService(cfg, client, agent_id, logger)
             logger.info("screen.service initialized")
         except Exception as e:
             logger.warning("screen.service init error=%s", e)
+
+        dlp_cfg = cfg.get("dlp", cfg.get("aegis_dlp", {}))
+        if dlp_cfg.get("enabled", True):
+            try:
+                dlp_thread = threading.Thread(
+                    target=_dlp_scanner_thread,
+                    args=(cfg, stop_event, logger),
+                    daemon=True,
+                    name="dlp-scanner",
+                )
+                dlp_thread.start()
+            except Exception as e:
+                logger.warning("dlp.thread start error=%s", e)
         for c in collectors:
             try:
                 client.upsert_source({

@@ -74,15 +74,19 @@ class InventoryService:
                 if self.agent_id:
                     self._state["agent_id"] = self.agent_id
                     self._save_state()
+                auth_token = result.get("auth_token", "")
+                if auth_token:
+                    self._state["auth_token"] = auth_token
+                    self._save_state()
                 logger.info(
-                    "inventory.registered id=%s created=%s",
-                    self.agent_id, result.get("created", False),
+                    "inventory.registered id=%s created=%s has_token=%s",
+                    self.agent_id, result.get("created", False), bool(auth_token),
                 )
                 return True
             else:
                 logger.error("inventory.register failed status=%s", resp.status_code)
         except Exception as e:
-            logger.error("inventory.register error=%s", e)
+            logger.error("inventory.register error: %s", e)
         return False
 
     def heartbeat(self, client, logger):

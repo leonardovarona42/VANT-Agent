@@ -1,105 +1,48 @@
-# VANT-Agent Configuration
-# Copy to config.yaml and customize for your environment
-
 server:
-  url: "http://127.0.0.1:8003"
-  logs_url: "http://127.0.0.1:9201"
-  auth_mode: "none"  # none | basic | token
-  auth_token: ""
-  auth_username: ""
-  auth_password: ""
-  timeout: 15
-  tls:
-    verify: true
-    ca_cert: ""
-
-output:
-  endpoint: ""
-  source_endpoint: ""
-  timeout_seconds: 10
-  auth:
-    mode: "none"
-    username: ""
-    password: ""
-    token: ""
-  tls:
-    enabled: false
-    verify: true
-    ca_cert: ""
-
-control:
-  server_url: ""
-  require_https: false
-  token: ""
-  poll_seconds: 30
-  verify_ssl: true
-  inventory_seconds: 86400
-  dlp_poll_seconds: 60
-  dlp_scan_seconds: 30
+  url: https://192.168.12.43
 
 agent:
-  id: ""  # auto-generated if empty
-  host_name: ""  # auto-detected if empty
-  check_interval: 60        # seconds between log collection cycles
-  heartbeat_interval: 300   # seconds between heartbeats
-  max_batch_size: 500
-  log_every_cycles: 60
+  check_interval: 60
+  heartbeat_interval: 300
 
 collectors:
-  snort:
-    enabled: false
-    path: "/var/log/snort/alert_json.txt"
-    source_type: "snort"
   suricata:
-    enabled: false
-    path: "/var/log/suricata/eve.json"
-    source_type: "suricata"
-  windows_eventlog:
-    enabled: false
-    channels:
-      - Security
-      - System
-      - Application
-  postgres:
-    enabled: false
-    path: "/var/log/postgresql/postgresql-*.log"
-  file_logs:
-    enabled: false
-    items: []
+    enabled: true
+    path: /var/log/suricata/eve.json
 
 inventory:
   enabled: true
-  interval: 300  # seconds between inventory submissions (default 5min)
+  interval: 300
+
+dlp:
+  enabled: true
+  scan_interval: 30
+  realtime_enabled: true
+  scan_paths:
+    - /
+  monitored_extensions:
+    - .docx
+    - .xlsx
+    - .pdf
+    - .txt
+    - .env
+    - .conf
+    - .yaml
+    - .json
 
 monitoring:
   enabled: true
-  processes:
-    enabled: true
-    max_processes: 50
-    sort_by: cpu
   services:
-    enabled: false
-    monitored_services: []
-  firewall:
-    enabled: false
-
-dlp:
-  enabled: false
-  scan_paths:
-    - "C:\\Users"
-    - "C:\\Documents"
-  scan_extensions:
-    - ".docx"
-    - ".xlsx"
-    - ".pdf"
-    - ".txt"
-  keywords:
-    - "clasificado"
-    - "secreto"
-    - "restringido"
+    enabled: true
+    monitored_services:
+      - postgresql
+      - suricata
+      - nginx
+      - redis-server
+    check_apt_updates: true
 
 logging:
-  level: "INFO"
-  file: ""  # auto: executable_dir/vant-agent.log
-  max_bytes: 10485760   # 10MB
+  level: INFO
+  file: /var/log/vant-agent/vant-agent.log
+  max_bytes: 10485760
   backup_count: 5

@@ -6,17 +6,13 @@ import yaml
 
 DEFAULTS = {
     "server": {
-        "url": "http://localhost:8000",
-        "logs_url": "http://localhost:9201",
+        "url": "https://192.168.12.43",
         "auth_mode": "none",
         "auth_token": "",
-        "auth_username": "",
-        "auth_password": "",
     },
     "agent": {
         "host_name": "",
         "check_interval": 60,
-        "max_batch_size": 500,
         "heartbeat_interval": 300,
         "log_level": "INFO",
         "log_file": "",
@@ -32,13 +28,15 @@ DEFAULTS = {
     },
     "inventory": {
         "enabled": True,
-        "interval": 86400,
+        "interval": 300,
     },
     "dlp": {
-        "enabled": False,
+        "enabled": True,
         "scan_paths": [],
         "scan_extensions": [".docx", ".xlsx", ".pdf", ".txt"],
         "keywords": ["clasificado", "secreto", "restringido"],
+        "scan_interval": 30,
+        "realtime_enabled": True,
     },
     "monitoring": {
         "enabled": False,

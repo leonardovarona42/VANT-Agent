@@ -843,13 +843,10 @@ class AegisDlpService:
     def fetch_remote_config(self, control_server, token, agent_id):
         if not control_server:
             return self.remote_config
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
-            url = f"{control_server}/aegis/api/agent/dlp/config/"
-            response = requests.get(
-                url,
-                headers={"Authorization": f"Bearer {token}"} if token else {},
-                timeout=10,
-            )
+            url = f"{control_server.rstrip('/')}/aegis/api/agent/dlp/config/"
+            response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 self.remote_config = {"policies": data.get("policies") or []}
@@ -874,11 +871,12 @@ class AegisDlpService:
                 except Exception:
                     pass
             enriched.append(item)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"} if token else {}
         try:
             response = requests.post(
-                f"{server_url}/aegis/api/agent/dlp/threats/",
+                f"{server_url.rstrip('/')}/aegis/api/agent/dlp/threats/",
                 json={"agent_id": agent_id, "incidents": enriched},
-                headers={"Authorization": f"Bearer {token}"} if token else {},
+                headers=headers,
                 timeout=120,
             )
             return response

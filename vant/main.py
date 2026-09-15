@@ -367,6 +367,7 @@ def run_with_stop(config_path, stop_event):
                         screen_service.stop()
                     logger.info("agent.stopped")
                     return result
+            inv_service.report_services(client, logger)
         except Exception as e:
             logger.warning("startup config check error=%s", e)
 
@@ -428,6 +429,7 @@ def run_with_stop(config_path, stop_event):
                             if result == "stop":
                                 stop_event.set()
                             break
+                    inv_service.report_services(client, logger)
                 except Exception as e:
                     logger.warning("heartbeat error=%s", e)
 

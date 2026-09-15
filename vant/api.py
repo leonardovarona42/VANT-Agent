@@ -37,6 +37,7 @@ class VantClient:
             self.verify = ca
 
         self.token = cfg.get("_auth_token", "") or server.get("auth_token", "")
+        self.service_secret = server.get("service_secret", "")
 
         self._session = requests.Session()
         retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[502, 503, 504])
@@ -49,6 +50,8 @@ class VantClient:
 
     def _headers(self):
         h = {"Content-Type": "application/json"}
+        if self.service_secret:
+            h["X-Service-Secret"] = self.service_secret
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
@@ -108,6 +111,14 @@ class VantClient:
         }
         return self._post(f"{self.base_url}/inventory/api/command-result/", payload)
 
+    def upload_processes(self, agent_id, processes, connections):
+        payload = {
+            "agent_id": agent_id,
+            "processes": processes,
+            "connections": connections,
+        }
+        return self._post(f"{self.base_url}/inventory/api/processes/upload/", payload, timeout=30)
+
     def ingest_logs(self, events):
         if not events:
             return {"ok": True, "inserted": 0}
@@ -121,6 +132,10 @@ class VantClient:
     def upload_screenshot(self, agent_id, image_b64):
         payload = {"agent_id": str(agent_id), "image": image_b64}
         return self._post(f"{self.base_url}/inventory/api/screen/upload/", payload, timeout=30)
+
+    def report_services(self, agent_id, services):
+        payload = {"agent_id": agent_id, "services": services}
+        return self._post(f"{self.base_url}/inventory/api/agents/{agent_id}/services/report/", payload, timeout=30)
 
     def fetch_dlp_config(self, token, agent_id):
         return self._get(f"{self.base_url}/aegis/api/agent/dlp/config/", timeout=10)

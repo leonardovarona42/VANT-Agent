@@ -9,6 +9,7 @@ DEFAULTS = {
         "url": "https://192.168.12.43",
         "auth_mode": "none",
         "auth_token": "",
+        "service_secret": "",
     },
     "agent": {
         "host_name": "",

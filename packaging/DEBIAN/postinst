@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+CONFIG_FILE="/opt/vant-agent/etc/config.yaml"
+
+echo "--------------------------------------------------"
+echo " VANT-SIEM Agent - Installation Configuration"
+echo "--------------------------------------------------"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Configuration file not found. Let's set it up."
+
+    read -p "Server URL [https://192.168.12.46]: " SERVER_URL
+    SERVER_URL=${SERVER_URL:-https://192.168.12.46}
+
+    read -p "Service Secret: " SERVICE_SECRET
+    if [ -z "$SERVICE_SECRET" ]; then
+        echo "Error: Service Secret is required for registration."
+        exit 1
+    fi
+
+    # Create a basic config.yaml
+    cat <<EOF > "$CONFIG_FILE"
+server:
+  url: "$SERVER_URL"
+  service_secret: "$SERVICE_SECRET"
+  auth_mode: "jwt"
+agent:
+  check_interval: 60
+  heartbeat_interval: 300
+collectors:
+  syslog:
+    enabled: true
+    path: /var/log/syslog
+inventory:
+  enabled: true
+  interval: 300
+dlp:
+  enabled: true
+logging:
+  level: INFO
+  file: /var/log/vant-agent.log
+EOF
+    echo "Configuration saved to $CONFIG_FILE"
+else
+    echo "Configuration file already exists. Skipping setup."
+fi
+
+echo "Configuring systemd service..."
+systemctl daemon-reload
+systemctl enable vant-agent
+systemctl start vant-agent
+
+echo "--------------------------------------------------"
+echo " VANT-SIEM Agent installed and started successfully!"
+echo "--------------------------------------------------"

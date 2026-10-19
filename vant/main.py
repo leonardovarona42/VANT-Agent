@@ -1,14 +1,25 @@
+"""
+VANT-SIEM Agent — Main Module v2.0.0
+Microservices architecture: all requests go through NGINX gateway.
+Auth: Register with AUTH service → get token → use for all endpoints.
+"""
 import argparse
 import sys
 import time
 import threading
+import datetime
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 from vant.config import load_config, find_config
 from vant.utils import detect_host, configure_logging, sleep_with_stop, get_current_ips
 from vant.api import VantClient
 from vant.modules.inventory.service import InventoryService
 from vant.modules.heartbeat.service import HeartbeatService
+from vant.modules.rules.manager import RuleManager
+from vant.modules.rules.base import SigmaRule
+from vant.modules.cti.service import CTIService
+from vant.modules.compliance.service import ComplianceService
 
 AGENT_VERSION = "2.0.0"
 
@@ -171,6 +182,20 @@ def build_collectors(cfg, logger):
         except Exception as e:
             logger.warning("firewall_monitor collector failed: %s", e)
 
+    if collectors_cfg.get("fim", {}).get("enabled"):
+        try:
+            from vant.modules.collectors.fim import FIMCollector
+            collectors.append(FIMCollector(collectors_cfg["fim"], agent_cfg))
+        except Exception as e:
+            logger.warning("fim collector failed to load: %s", e)
+
+    if collectors_cfg.get("vulnscan", {}).get("enabled"):
+        try:
+            from vant.modules.collectors.vulnscan import VulnscanCollector
+            collectors.append(VulnscanCollector(collectors_cfg["vulnscan"], agent_cfg))
+        except Exception as e:
+            logger.warning("vulnscan collector failed to load: %s", e)
+
     return collectors
 
 
@@ -247,11 +272,70 @@ def _dlp_scanner_thread(cfg, stop_event, logger):
         sleep_with_stop(stop_event, DLP_SCAN_INTERVAL)
 
 
+def _watchdog_thread(stop_event, logger):
+    """
+    Anti-kill watchdog: monitors the agent process and restarts it if killed.
+    In a real implementation, this would be a separate lightweight process.
+    """
+    logger.info("watchdog.started")
+    while not stop_event.is_set():
+        # In this mock implementation, we simply log that we are monitoring.
+        # To actually implement anti-kill, we would use a companion process
+        # or a system service (systemd/windows service) that auto-restarts.
+        time.sleep(10)
+    logger.info("watchdog.stopped")
+
 def run_with_stop(config_path, stop_event):
     cfg = load_config(config_path)
     cfg["_config_path"] = config_path
     logger = configure_logging(cfg.get("logging", {}), config_path)
     host_name, host_ip = detect_host()
+
+    def _enrich_event_with_cti(event: Dict[str, Any], cti_service: Optional[CTIService]) -> Dict[str, Any]:
+        """Enrich event with CTI data if service is available"""
+        if not cti_service:
+            return event
+
+        # Create a copy of the event to avoid modifying the original
+        enriched_event = event.copy()
+
+        # Check for malicious IPs in common fields
+        ip_fields = ["src_ip", "dst_ip", "source_ip", "destination_ip", "ip", "ip_address"]
+        for field in ip_fields:
+            if field in event and isinstance(event[field], str):
+                ip = event[field]
+                if cti_service.is_ip_malicious(ip):
+                    # Add CTI tag to indicate this event involves a malicious IP
+                    if "tags" not in enriched_event:
+                        enriched_event["tags"] = []
+                    if "cti_malicious_ip" not in enriched_event["tags"]:
+                        enriched_event["tags"].append("cti_malicious_ip")
+                    # Also add the specific malicious IP for context
+                    if "cti_malicious_ips" not in enriched_event:
+                        enriched_event["cti_malicious_ips"] = []
+                    if ip not in enriched_event["cti_malicious_ips"]:
+                        enriched_event["cti_malicious_ips"].append(ip)
+                    break  # Stop after first malicious IP found (to avoid too many tags)
+
+        # Check for malicious IPs in nested payloads
+        raw_payload = event.get("raw_payload", {})
+        if isinstance(raw_payload, dict):
+            # Check common IP fields in payload
+            for field in ip_fields:
+                if field in raw_payload and isinstance(raw_payload[field], str):
+                    ip = raw_payload[field]
+                    if cti_service.is_ip_malicious(ip):
+                        if "tags" not in enriched_event:
+                            enriched_event["tags"] = []
+                        if "cti_malicious_ip" not in enriched_event["tags"]:
+                            enriched_event["tags"].append("cti_malicious_ip")
+                        if "cti_malicious_ips" not in enriched_event:
+                            enriched_event["cti_malicious_ips"] = []
+                        if ip not in enriched_event["cti_malicious_ips"]:
+                            enriched_event["cti_malicious_ips"].append(ip)
+                        break
+
+        return enriched_event
 
     agent_cfg = cfg.get("agent", {})
     if not agent_cfg.get("host_name"):
@@ -261,6 +345,22 @@ def run_with_stop(config_path, stop_event):
 
     client = VantClient(cfg)
     collectors = build_collectors(cfg, logger)
+
+    # Initialize rules manager
+    rules_manager = RuleManager()
+    rules_config = cfg.get("rules", {})
+    rules_dir = rules_config.get("directory")
+    if rules_dir:
+        # Use custom rules directory if specified in config
+        rules_manager = RuleManager(rules_dir)
+    else:
+        # Use default rules directory
+        rules_manager = RuleManager()
+
+    # Load rules from directory
+    loaded_count = rules_manager.load_rules_from_directory()
+    logger.info(f"Loaded {loaded_count} rules from rules engine")
+
     interval = int(agent_cfg.get("interval_seconds") or agent_cfg.get("check_interval") or 60)
     log_every = int(agent_cfg.get("log_every_cycles", 60))
 
@@ -271,9 +371,24 @@ def run_with_stop(config_path, stop_event):
     inv_service = InventoryService(cfg) if inv_enabled else None
     inv_interval = int(inv_cfg.get("interval", 300))
 
+    # Initialize CTI service
+    cti_cfg = cfg.get("cti", {})
+    cti_enabled = cti_cfg.get("enabled", True)
+    cti_service = CTIService(cti_cfg) if cti_enabled else None
+    if cti_service:
+        cti_service.start()
+
+    # Initialize Compliance service
+    compliance_cfg = cfg.get("compliance", {})
+    compliance_enabled = compliance_cfg.get("enabled", True)
+    compliance_service = ComplianceService(config_path) if compliance_enabled else None
+    compliance_interval = int(compliance_cfg.get("interval", 86400))  # default 24 hours
+    next_compliance_run = time.time()
+
     hb_service = HeartbeatService(cfg, logger)
     screen_service = None
     dlp_thread = None
+    watchdog_thread = None
 
     logger.info(
         "agent.starting version=%s host=%s ip=%s interval=%ss collectors=%s",
@@ -371,9 +486,19 @@ def run_with_stop(config_path, stop_event):
         except Exception as e:
             logger.warning("startup config check error=%s", e)
 
+        # Start watchdog thread
+        watchdog_thread = threading.Thread(
+            target=_watchdog_thread,
+            args=(stop_event, logger),
+            daemon=True,
+            name="watchdog"
+        )
+        watchdog_thread.start()
+
     exit_reason = None
     cycle = 0
     next_inventory = time.time()
+    next_rules_reload = time.time() + rules_config.get("reload_interval", 300)
 
     agent_id = inv_service.agent_id if inv_service else None
 
@@ -392,15 +517,100 @@ def run_with_stop(config_path, stop_event):
                 except Exception as e:
                     logger.exception("collector failed source=%s", collector.source_type)
 
+            # Check if it's time to reload rules
+            now = time.time()
+            if now >= next_rules_reload:
+                rules_manager.reload_rules()
+                next_rules_reload = now + rules_config.get("reload_interval", 300)
+                logger.info("Rules reloaded from directory")
+
+            # Check if it's time to run compliance collection
+            if compliance_service and now >= next_compliance_run:
+                logger.info("Running compliance evidence collection")
+                try:
+                    # Collect evidence
+                    evidence = compliance_service.collect_evidence(
+                        agent_id or "",
+                        agent_cfg.get("host_name", ""),
+                        agent_cfg.get("host_ip", "")
+                    )
+                    # Generate a JSON report for HIPAA (we can rotate frameworks in a real implementation)
+                    json_report = compliance_service.generate_report(evidence, "HIPAA", "json")
+                    # Upload as a log event
+                    compliance_event = {
+                        "source_type": "compliance_evidence",
+                        "source_name": "compliance_service",
+                        "host_name": agent_cfg.get("host_name", ""),
+                        "host_ip": agent_cfg.get("host_ip", ""),
+                        "event_time": datetime.now(timezone.utc).isoformat(),
+                        "severity": "info",
+                        "event_category": "compliance.report",
+                        "message": "Compliance evidence collected",
+                        "raw_payload": {
+                            "report": json_report,  # Note: This could be large; consider splitting or storing reference
+                            "framework": "HIPAA",
+                            "timestamp": evidence["collected_at"]
+                        },
+                        "tags": ["compliance", "report"]
+                    }
+                    # We'll send the compliance event as a log
+                    if compliance_event:
+                        client.ingest_logs([compliance_event])
+                    # Update next run time
+                    next_compliance_run = now + compliance_interval
+                    logger.info("Compliance evidence collection completed and uploaded")
+                except Exception as e:
+                    logger.exception("compliance collection failed: %s", e)
+                    # Still update the next run time to avoid tight loop on error
+                    next_compliance_run = now + compliance_interval
+
+            # Process events through rules engine
+            alert_batch = []
+            for event in batch:
+                # Enrich event with CTI data
+                enriched_event = _enrich_event_with_cti(event, cti_service)
+                # Check event against all rules
+                matching_rules = rules_manager.match_event(enriched_event)
+                if matching_rules:
+                    # Create alert event
+                    alert_event = {
+                        "source_type": "alert",
+                        "source_name": "rules_engine",
+                        "host_name": agent_cfg.get("host_name", ""),
+                        "host_ip": agent_cfg.get("host_ip", ""),
+                        "event_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "severity": "high",  # Could be based on rule level
+                        "event_category": "alert.rule_match",
+                        "message": f"Rule match: {', '.join([r.title for r in matching_rules])}",
+                        "raw_payload": {
+                            "original_event": event,
+                            "matching_rules": [r.get_info() for r in matching_rules]
+                        },
+                        "tags": ["alert", "rules_engine"] + [tag for r in matching_rules for tag in r.tags]
+                    }
+
+                    # Add CTI information to alert if present in enriched event
+                    if "cti_malicious_ips" in enriched_event:
+                        alert_event["raw_payload"]["cti_malicious_ips"] = enriched_event["cti_malicious_ips"]
+                        if "cti_malicious_ip" not in alert_event["tags"]:
+                            alert_event["tags"].append("cti_malicious_ip")
+                    alert_batch.append(alert_event)
+
+                    # Log the alert
+                    for rule in matching_rules:
+                        logger.info(f"RULE MATCH: {rule.rule_id} - {rule.title}")
+
+            # Send original events and alert events
             try:
                 if batch:
                     client.ingest_logs(batch)
+                if alert_batch:
+                    client.ingest_logs(alert_batch)
                 if log_every > 0 and (cycle % log_every == 0):
-                    logger.info("cycle ok events=%s collectors=%s", len(batch), len(collectors))
+                    logger.info("cycle ok events=%s collectors=%s alerts=%s",
+                               len(batch), len(collectors), len(alert_batch))
             except Exception as e:
-                logger.error("ingest failed error=%s batch=%s", e, len(batch))
-
-            now = time.time()
+                logger.error("ingest failed error=%s batch=%s alert_batch=%s", e, len(batch), len(alert_batch))
 
             if inv_service and now >= next_inventory:
                 if not inv_service.agent_id:
@@ -441,6 +651,11 @@ def run_with_stop(config_path, stop_event):
 
     if screen_service:
         screen_service.stop()
+    if cti_service:
+        cti_service.shutdown()
+    if watchdog_thread:
+        # stop_event is already set, but we can explicitly wait or join if not daemon
+        pass
     logger.info("agent.stopped")
     return exit_reason
 

@@ -1,0 +1,23 @@
+title: Suspicious Cron Job Creation
+id: 8a7b6c5d-4e3f-2g1h-0i9j-8k7l6m5n4o3p
+description: Detects creation of cron jobs in unusual locations which may indicate persistence
+status: experimental
+author: VANT-SIEM Rules Team
+date: 2024/09/15
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        MSG: '*USER_CMD*'
+        EXE: '*cron*'
+        # Look for cron jobs in world-writable or unusual directories
+        CMD: '*|*crontab*'  # Piped to crontab
+        CMD: '* /tmp/*'
+        CMD: '* /var/tmp/*'
+        CMD: '* /dev/shm/*'
+    condition: selection
+level: medium
+tags:
+    - attack.persistence
+    - attack.t1053.003  # Cron

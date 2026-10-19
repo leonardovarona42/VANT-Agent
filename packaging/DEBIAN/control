@@ -1,0 +1,8 @@
+Package: vant-agent
+Version: 2.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: VANT-SIEM Team <admin@vant.local>
+Description: VANT-SIEM Agent for Linux
+  A lightweight agent for system monitoring, log collection, and DLP.

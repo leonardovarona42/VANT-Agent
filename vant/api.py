@@ -10,6 +10,7 @@ import time
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import ssl
 
 logger = logging.getLogger("vant-agent.api")
 
@@ -36,6 +37,18 @@ class VantClient:
         if ca and os.path.isfile(ca):
             self.verify = ca
 
+        # mTLS configuration
+        self.cert = tls.get("client_cert", "")
+        self.key = tls.get("client_key", "")
+        if self.cert and os.path.isfile(self.cert):
+            # requests expects (cert, key) tuple if key is provided, or just cert path
+            if self.key and os.path.isfile(self.key):
+                self.cert_pair = (self.cert, self.key)
+            else:
+                self.cert_pair = self.cert
+        else:
+            self.cert_pair = None
+
         self.token = cfg.get("_auth_token", "") or server.get("auth_token", "")
         self.service_secret = server.get("service_secret", "")
 
@@ -61,6 +74,7 @@ class VantClient:
             return self._session.post(
                 url, json=payload, headers=self._headers(),
                 timeout=timeout or self.timeout, verify=self.verify,
+                cert=self.cert_pair,
             )
         except requests.exceptions.ConnectionError:
             logger.warning("connection_failed url=%s", url)
@@ -74,6 +88,7 @@ class VantClient:
             return self._session.get(
                 url, headers=self._headers(),
                 timeout=timeout or self.timeout, verify=self.verify,
+                cert=self.cert_pair,
             )
         except requests.exceptions.ConnectionError:
             logger.warning("connection_failed url=%s", url)

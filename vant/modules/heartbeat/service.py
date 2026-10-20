@@ -56,6 +56,20 @@ class HeartbeatService:
                 if inventory_service:
                     inventory_service.collect_and_submit(client, logger)
                     client.send_command_result(cmd_id, "completed", {"status": "ok"})
+            elif cmd_type == "collect_processes":
+                try:
+                    result = self._collect_processes()
+                    if inventory_service and inventory_service.agent_id:
+                        inventory_service.upload_processes(client, inventory_service.agent_id, result, logger)
+                    client.send_command_result(cmd_id, "completed", {"status": "ok", "process_count": len(result.get("processes", []))})
+                    logger.info("command.completed type=collect_processes processes=%d connections=%d",
+                                len(result.get("processes", [])), len(result.get("connections", [])))
+                except Exception as e:
+                    logger.error("command.failed type=collect_processes error=%s", e)
+                    try:
+                        client.send_command_result(cmd_id, "failed", {"error": str(e)})
+                    except Exception:
+                        pass
             elif cmd_type == "restart_agent":
                 logger.warning("command.restart received")
                 client.send_command_result(cmd_id, "completed")
@@ -91,6 +105,44 @@ class HeartbeatService:
                 client.send_command_result(cmd_id, "completed", {"status": f"unknown_command:{cmd_type}"})
 
         return "reload" if reloaded else None
+
+    def _collect_processes(self):
+        import psutil
+        processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent', 'cmdline', 'exe']):
+            try:
+                info = proc.info
+                processes.append({
+                    "pid": info.get("pid"),
+                    "name": info.get("name", ""),
+                    "user": info.get("username", ""),
+                    "cpu_percent": round(info.get("cpu_percent", 0) or 0, 1),
+                    "mem_percent": round(info.get("memory_percent", 0) or 0, 1),
+                    "cmdline": " ".join(info.get("cmdline") or []),
+                    "exe": info.get("exe", ""),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        connections = []
+        for conn in psutil.net_connections(kind="inet"):
+            try:
+                connections.append({
+                    "protocol": "TCP" if conn.type == 1 else "UDP",
+                    "local_addr": f"{conn.laddr.ip}:{conn.laddr.port}" if conn.laddr else "-",
+                    "remote_addr": f"{conn.raddr.ip}:{conn.raddr.port}" if conn.raddr else "-",
+                    "status": conn.status or "-",
+                    "pid": conn.pid or 0,
+                    "process_name": "",
+                })
+            except Exception:
+                continue
+
+        proc_map = {p["pid"]: p["name"] for p in processes}
+        for c in connections:
+            c["process_name"] = proc_map.get(c["pid"], "")
+
+        return {"processes": processes, "connections": connections}
 
     def _apply_config(self, config_data, config_path, logger):
         from vant.config import save_config

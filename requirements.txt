@@ -1,10 +1,11 @@
-# VANT-Agent Dependencies
-
-PyYAML>=6.0
-requests>=2.28.0
-
-# GUI (Windows tray) - optional
-PyQt6>=6.10; platform_system == "Windows"
-
-# Build tools - optional
-pyinstaller>=5.0
+requests
+PyYAML
+psutil
+netifaces
+python-docx
+openpyxl
+python-pptx
+odfpy
+pypdf
+olefile
+Pillow

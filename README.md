@@ -11,6 +11,8 @@ VANT-Agent se instala en los endpoints (Windows/Linux) y se encarga de:
 - **Recoleccion multi-fuente**: Snort, Suricata, Windows Event Log, PostgreSQL, file logs
 - **Inventario de hardware/software**: CPU, memoria, disco, software instalado, red, USB
 - **DLP (Aegis)**: Deteccion de fuga de informacion clasificada
+- **Motor de Reglas Sigma**: Deteccion de amenazas en tiempo real usando reglas Sigma
+- **Integración de CTI**: Enriquecimiento de eventos con feeds de inteligencia de amenazas
 - **Envio al servidor**: Comunicacion con VANT-SIEM via API REST
 
 ## Arquitectura
@@ -37,8 +39,15 @@ VANT-Agent (endpoint)
     │       │   └── service.py
     │       ├── dlp/
     │       │   └── aegis.py    → Motor DLP
-    │       └── heartbeat/
-    │           └── service.py  → Heartbeat + comandos
+    │       ├── heartbeat/
+    │       │   └── service.py  → Heartbeat + comandos
+    │       ├── rules/          → Motor de reglas Sigma
+    │       │   ├── base.py     → Clase base de reglas
+    │       │   ├── manager.py  → Gestor de reglas
+    │       │   └── examples/   → Reglas de ejemplo
+    │       └── cti/            → Integración de Cyber Threat Intelligence
+    │           ├── service.py  → Servicio CTI
+    │           └── __init__.py → Paquete CTI
     │
     ├── config.yaml             → Configuracion del agente
     └── installer/              → Windows installer
@@ -49,14 +58,20 @@ VANT-Agent (endpoint)
 ## Flujo de datos
 
 ```
-Endpoint                    VANT-SIEM Server
-    │                            │
-    ├── POST /inventory/api/register/ ─┤
-    ├── POST /inventory/api/heartbeat/ ─┤
-    ├── POST /inventory/api/inventory/submit/ ─┤
-    ├── POST /inventory/api/command-result/ ─┤
-    ├── POST /logs/api/ingest/bulk/ ─┤
-    └── POST /logs/api/sources/ ─┤
+Endpoint                    VANT-SIEM Agent                    VANT-SIEM Server
+    │                            │                                │
+    ├── Recolección de eventos ───────────────────────────────┤
+    │                            │                                │
+    ├── Enriquecimiento con CTI ───────────────────────────────┤
+    │                            │                                │
+    ├── Procesamiento mediante reglas Sigma ───────────────────┤
+    │                            │                                │
+    ├── POST /inventory/api/register/ ─────────────────────────┤
+    ├── POST /inventory/api/heartbeat/ ────────────────────────┤
+    ├── POST /inventory/api/inventory/submit/ ─────────────────┤
+    ├── POST /inventory/api/command-result/ ───────────────────┤
+    ├── POST /logs/api/ingest/bulk/ ───────────────────────────┤
+    └── POST /logs/api/sources/ ───────────────────────────────┤
 ```
 
 ## Instalacion

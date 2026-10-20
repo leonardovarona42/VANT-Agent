@@ -1,5 +1,18 @@
+"""
+VANT-SIEM Agent — API Client v2.0
+Microservices architecture: all requests go through NGINX gateway.
+Auth: Register with AUTH service → get token → use for all endpoints.
+"""
+import logging
 import os
+import time
+
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import ssl
+
+logger = logging.getLogger("vant-agent.api")
 
 
 class VantClient:
@@ -9,22 +22,8 @@ class VantClient:
         output = cfg.get("output", {})
 
         self.base_url = (
-            control.get("server_url") or server.get("url") or "http://localhost:8000"
+            control.get("server_url") or server.get("url") or "https://localhost"
         ).rstrip("/")
-
-        logs_base = server.get("logs_url", "http://localhost:9201").rstrip("/")
-        self.ingest_endpoint = (
-            output.get("endpoint") or f"{logs_base}/logs/api/ingest/bulk/"
-        )
-        self.source_endpoint = (
-            output.get("source_endpoint") or f"{logs_base}/logs/api/sources/"
-        )
-
-        auth = output.get("auth", {}) or {}
-        self.auth_mode = auth.get("mode", server.get("auth_mode", "none"))
-        self.token = auth.get("token", server.get("auth_token", ""))
-        self.username = auth.get("username", server.get("auth_username", ""))
-        self.password = auth.get("password", server.get("auth_password", ""))
 
         self.timeout = int(
             output.get("timeout_seconds")
@@ -38,30 +37,68 @@ class VantClient:
         if ca and os.path.isfile(ca):
             self.verify = ca
 
+        # mTLS configuration
+        self.cert = tls.get("client_cert", "")
+        self.key = tls.get("client_key", "")
+        if self.cert and os.path.isfile(self.cert):
+            # requests expects (cert, key) tuple if key is provided, or just cert path
+            if self.key and os.path.isfile(self.key):
+                self.cert_pair = (self.cert, self.key)
+            else:
+                self.cert_pair = self.cert
+        else:
+            self.cert_pair = None
+
+        self.token = cfg.get("_auth_token", "") or server.get("auth_token", "")
+        self.service_secret = server.get("service_secret", "")
+
+        self._session = requests.Session()
+        retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
+
+    def set_token(self, token):
+        self.token = token
+
     def _headers(self):
         h = {"Content-Type": "application/json"}
-        if self.auth_mode == "token" and self.token:
+        if self.service_secret:
+            h["X-Service-Secret"] = self.service_secret
+        if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    def _auth(self):
-        if self.auth_mode == "basic":
-            return (self.username, self.password)
-        return None
-
     def _post(self, url, payload, timeout=None):
-        return requests.post(
-            url, json=payload, headers=self._headers(),
-            auth=self._auth(), timeout=timeout or self.timeout,
-            verify=self.verify,
-        )
+        try:
+            return self._session.post(
+                url, json=payload, headers=self._headers(),
+                timeout=timeout or self.timeout, verify=self.verify,
+                cert=self.cert_pair,
+            )
+        except requests.exceptions.ConnectionError:
+            logger.warning("connection_failed url=%s", url)
+            raise
+        except requests.exceptions.Timeout:
+            logger.warning("timeout url=%s", url)
+            raise
 
     def _get(self, url, timeout=None):
-        return requests.get(
-            url, headers=self._headers(),
-            auth=self._auth(), timeout=timeout or self.timeout,
-            verify=self.verify,
-        )
+        try:
+            return self._session.get(
+                url, headers=self._headers(),
+                timeout=timeout or self.timeout, verify=self.verify,
+                cert=self.cert_pair,
+            )
+        except requests.exceptions.ConnectionError:
+            logger.warning("connection_failed url=%s", url)
+            raise
+        except requests.exceptions.Timeout:
+            logger.warning("timeout url=%s", url)
+            raise
+
+    def register_with_auth(self, data):
+        return self._post(f"{self.base_url}/auth/api/agent/register/", data)
 
     def register_agent(self, data):
         return self._post(f"{self.base_url}/inventory/api/register/", data)
@@ -89,16 +126,38 @@ class VantClient:
         }
         return self._post(f"{self.base_url}/inventory/api/command-result/", payload)
 
+    def upload_processes(self, agent_id, processes, connections):
+        payload = {
+            "agent_id": agent_id,
+            "processes": processes,
+            "connections": connections,
+        }
+        return self._post(f"{self.base_url}/inventory/api/processes/upload/", payload, timeout=30)
+
     def ingest_logs(self, events):
         if not events:
             return {"ok": True, "inserted": 0}
-        resp = self._post(self.ingest_endpoint, {"events": events}, timeout=30)
+        resp = self._post(f"{self.base_url}/logs/api/ingest/bulk/", {"events": events}, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
     def upsert_source(self, source):
-        return self._post(self.source_endpoint, source)
+        return self._post(f"{self.base_url}/logs/api/sources/", source)
 
     def upload_screenshot(self, agent_id, image_b64):
         payload = {"agent_id": str(agent_id), "image": image_b64}
         return self._post(f"{self.base_url}/inventory/api/screen/upload/", payload, timeout=30)
+
+    def report_services(self, agent_id, services):
+        payload = {"agent_id": agent_id, "services": services}
+        return self._post(f"{self.base_url}/inventory/api/agents/{agent_id}/services/report/", payload, timeout=30)
+
+    def fetch_dlp_config(self, token, agent_id):
+        return self._get(f"{self.base_url}/aegis/api/agent/dlp/config/", timeout=10)
+
+    def submit_dlp_threats(self, token, agent_id, incidents):
+        return self._post(
+            f"{self.base_url}/aegis/api/agent/dlp/threats/",
+            {"agent_id": agent_id, "incidents": incidents},
+            timeout=120,
+        )

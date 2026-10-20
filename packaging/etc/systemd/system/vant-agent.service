@@ -1,0 +1,14 @@
+[Unit]
+Description=VANT-SIEM Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vant-agent
+ExecStart=/opt/vant-agent/bin/vant-agent --config /opt/vant-agent/etc/config.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

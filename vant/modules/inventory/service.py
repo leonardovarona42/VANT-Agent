@@ -101,7 +101,7 @@ class InventoryService:
                 if commands:
                     logger.info("heartbeat got %d pending commands", len(commands))
 
-                cfg_update = data.get("config_update", {})
+                cfg_update = data.get("config_update") or {}
                 if cfg_update.get("available"):
                     logger.info("config update available version=%s", cfg_update.get("version"))
 
@@ -123,28 +123,108 @@ class InventoryService:
             hw = collect_linux_hardware()
             sw = collect_linux_software()
 
+        hw_hash = self._hash_hw(hw)
+        sw_hash = self._hash_sw(sw)
+        prev_hw = self._state.get("hardware_hash")
+        prev_sw = self._state.get("software_hash")
+        first_time = prev_hw is None and prev_sw is None
+
+        if not first_time and hw_hash == prev_hw and sw_hash == prev_sw:
+            self._state["last_inventory"] = time.time()
+            self._save_state()
+            return False
+
         try:
             resp = client.submit_inventory(self.agent_id, hw, sw)
             if resp.status_code == 200:
                 result = resp.json()
                 logger.info(
-                    "inventory.submitted hw=ok sw=%d",
+                    "inventory.submitted hw=%s sw=%d changed=%s",
+                    "changed" if hw_hash != prev_hw else "same",
                     result.get("software_count", len(sw)),
+                    "yes" if sw_hash != prev_sw else "no",
                 )
                 self._state["last_inventory"] = time.time()
-                self._state["hardware_hash"] = self._hash_hw(hw)
+                self._state["hardware_hash"] = hw_hash
+                self._state["software_hash"] = sw_hash
                 self._save_state()
                 return True
             else:
                 logger.error("inventory.submit failed status=%s", resp.status_code)
         except Exception as e:
-            logger.error("inventory.submit error=%s", e)
+            logger.error("inventory.submit error: %s", e)
         return False
 
     def _hash_hw(self, hw):
         key = f"{hw.get('serial_number', '')}|{hw.get('cpu_model', '')}|{hw.get('ram_total_gb', 0)}"
         return hash(key)
 
+    def _hash_sw(self, sw):
+        items = sorted(
+            [(s.get("name", ""), s.get("version", "")) for s in sw],
+            key=lambda x: x[0],
+        )
+        return hash(tuple(items))
+
+    def upload_processes(self, client, agent_id, data, logger):
+        try:
+            resp = client.upload_processes(agent_id, data.get("processes", []), data.get("connections", []))
+            if resp and resp.status_code == 200:
+                logger.info("processes.uploaded agent=%s procs=%d conns=%d",
+                            agent_id, len(data.get("processes", [])), len(data.get("connections", [])))
+            else:
+                status = resp.status_code if resp else "no_response"
+                logger.warning("processes.upload failed agent=%s status=%s", agent_id, status)
+        except Exception as e:
+            logger.warning("processes.upload error: %s", e)
+
     def should_submit(self, interval):
         last = self._state.get("last_inventory", 0)
         return (time.time() - last) >= interval
+
+    def report_services(self, client, logger):
+        if not self.agent_id:
+            return
+        try:
+            result = self._list_services()
+            services = result.get("services", [])
+            if services:
+                resp = client.report_services(self.agent_id, services)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    logger.info("services.reported count=%d events=%d",
+                                data.get("services_count", 0), data.get("events_generated", 0))
+                else:
+                    status_code = resp.status_code if resp else "no_response"
+                    logger.warning("services.report failed status=%s", status_code)
+        except Exception as e:
+            logger.warning("services.report error: %s", e)
+
+    def _list_services(self):
+        import sys as _sys
+        if _sys.platform.startswith("win"):
+            return {"services": []}
+        services = []
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["systemctl", "list-units", "--type=service", "--all",
+                 "--no-pager", "--no-legend", "--plain", "--output=json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip().startswith("["):
+                import json as _json
+                units = _json.loads(result.stdout)
+                for u in units:
+                    svc_name = u.get("unit", "").replace(".service", "")
+                    if not svc_name:
+                        continue
+                    services.append({
+                        "name": svc_name,
+                        "description": u.get("description", ""),
+                        "active_state": u.get("active", ""),
+                        "sub_state": u.get("sub", ""),
+                    })
+        except Exception:
+            pass
+        return {"services": services}

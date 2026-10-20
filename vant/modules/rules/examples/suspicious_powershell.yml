@@ -1,0 +1,18 @@
+title: Suspicious PowerShell Encoded Command
+id: 947f8485-6d67-42eb-998d-3603ccc5f809
+description: Detects base64 encoded PowerShell commands which may indicate obfuscated malicious activity
+status: experimental
+author: VANT-SIEM Rules Team
+date: 2024/09/15
+logsource:
+    product: windows
+    service: powershell
+detection:
+    selection:
+        EventID: 4104  # PowerShell script block logging
+        ScriptBlockText: '*[Convert]::ToString*'
+    condition: selection
+level: high
+tags:
+    - attack.execution
+    - attack.t1059.001  # PowerShell
